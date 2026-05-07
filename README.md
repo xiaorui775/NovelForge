@@ -182,4 +182,4 @@ Project → Outline → ChapterOutline → Chapter → ChapterVersion
 
 ## 许可
 
-私有项目，仅供个人使用。
+本项目采用 Apache-2.0 License 开源协议。
