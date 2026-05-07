@@ -43,3 +43,4 @@ storage/
 *.log
 .claude/settings.json
 frontend/pnpm-lock.yaml
+package-lock.json
