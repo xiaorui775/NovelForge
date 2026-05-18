@@ -44,11 +44,16 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   const [refineSuggestions, setRefineSuggestions] = useState<RefineSuggestion[]>([]);
   const [brainstorming, setBrainstorming] = useState(false);
   const [brainstormResult, setBrainstormResult] = useState<ChapterBrainstormResponse | null>(null);
+  const [saveRetrying, setSaveRetrying] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const lastSavedContentRef = useRef('');
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savingRef = useRef(false);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryCountRef = useRef(0);
+  const contentRef = useRef('');
 
   const undoStackRef = useRef<{ past: string[]; future: string[] }>({ past: [], future: [] });
   const pushUndoSnapshot = useCallback((currentContent: string) => {
@@ -74,8 +79,12 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     setContent(next);
   }, [content]);
 
+  // Keep contentRef in sync with content state for use in callbacks
+  useEffect(() => { contentRef.current = content; }, [content]);
+
   useEffect(() => { fetchModels(); }, [fetchModels]);
 
+  // Restore draft from localStorage if available
   useEffect(() => {
     if (chapterOutlineId) loadChapter();
   }, [chapterOutlineId]);
@@ -115,10 +124,25 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
       setChapter(chapterRes.data);
       setChapterOutline(outlineRes.data);
       const loadedContent = chapterRes.data.content || '';
-      setContent(loadedContent);
+      // Check for unsaved draft in localStorage
+      const draftKey = `draft:${chapterOutlineId}`;
+      const savedDraft = localStorage.getItem(draftKey);
+      if (savedDraft && savedDraft !== loadedContent) {
+        const shouldRestore = window.confirm('检测到未保存的草稿，是否恢复？');
+        if (shouldRestore) {
+          setContent(savedDraft);
+          setSaveStatus('unsaved');
+        } else {
+          setContent(loadedContent);
+          localStorage.removeItem(draftKey);
+        }
+      } else {
+        setContent(loadedContent);
+        if (savedDraft) localStorage.removeItem(draftKey);
+      }
       setRefineSuggestions([]);
       lastSavedContentRef.current = loadedContent;
-      setSaveStatus('saved');
+      if (saveStatus !== 'unsaved') setSaveStatus('saved');
       const { data: versionList } = await chaptersApi.listVersions(chapterRes.data.id);
       setVersions(versionList);
     } catch {
@@ -128,31 +152,61 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   };
 
   const doAutoSave = useCallback(async () => {
-    if (!chapter || content === lastSavedContentRef.current) return;
+    const currentChapter = chapter;
+    const currentContent = contentRef.current;
+    if (!currentChapter || currentContent === lastSavedContentRef.current || savingRef.current) return;
+    savingRef.current = true;
     setSaveStatus('saving');
     try {
-      await chaptersApi.update(chapter.id, { content });
-      lastSavedContentRef.current = content;
+      await chaptersApi.update(currentChapter.id, { content: currentContent, auto_save: true });
+      lastSavedContentRef.current = currentContent;
+      if (chapterOutlineId) localStorage.removeItem(`draft:${chapterOutlineId}`);
       setSaveStatus('saved');
+      retryCountRef.current = 0;
+      setSaveRetrying(false);
     } catch {
       setSaveStatus('unsaved');
+      if (retryCountRef.current < 3) {
+        const delay = 3000 * Math.pow(2, retryCountRef.current);
+        retryCountRef.current++;
+        setSaveRetrying(true);
+        retryTimerRef.current = setTimeout(() => {
+          savingRef.current = false;
+          doAutoSave();
+        }, delay);
+        return;
+      }
+      setSaveRetrying(false);
     }
-  }, [chapter, content]);
+    savingRef.current = false;
+  }, [chapter, chapterOutlineId]);
 
   useEffect(() => {
     if (!chapter || generating || refining) return;
     if (content === lastSavedContentRef.current) return;
     setSaveStatus('unsaved');
+    // Write to localStorage immediately for crash protection
+    if (chapterOutlineId) {
+      try { localStorage.setItem(`draft:${chapterOutlineId}`, content); } catch { /* quota exceeded */ }
+    }
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     autoSaveTimerRef.current = setTimeout(() => { doAutoSave(); }, 2000);
     return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
-  }, [content, chapter, generating, refining, doAutoSave]);
+  }, [content, chapter, generating, refining, doAutoSave, chapterOutlineId]);
 
   useEffect(() => {
-    const handler = (e: BeforeUnloadEvent) => { if (saveStatus === 'unsaved') e.preventDefault(); };
+    const handler = (e: BeforeUnloadEvent) => {
+      if (saveStatus === 'unsaved' || saveStatus === 'saving') {
+        e.preventDefault();
+        // Save to localStorage on page close
+        if (chapterOutlineId && content !== lastSavedContentRef.current) {
+          try { localStorage.setItem(`draft:${chapterOutlineId}`, content); } catch { /* quota exceeded */ }
+        }
+      }
+    };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
-  }, [saveStatus]);
+  }, [saveStatus, chapterOutlineId, content]);
 
   const doGenerate = useCallback(() => {
     if (!chapter || !selectedModel) return;
@@ -375,17 +429,26 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
 
   const handleSave = async () => {
     if (!chapter) return;
+    // Cancel any pending auto-save retry
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    retryCountRef.current = 0;
+    savingRef.current = true;
     setSaving(true);
     setSaveStatus('saving');
     try {
       await chaptersApi.update(chapter.id, { content });
       lastSavedContentRef.current = content;
+      if (chapterOutlineId) localStorage.removeItem(`draft:${chapterOutlineId}`);
       setSaveStatus('saved');
       showToast('success', '保存成功');
     } catch {
       setSaveStatus('unsaved');
       showToast('error', '保存失败');
     }
+    savingRef.current = false;
     setSaving(false);
   };
 
@@ -469,7 +532,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   return useMemo(() => ({
     chapterOutline, chapter, versions, content, setContent,
     loading, selectedModel, setSelectedModel, generating, streamingContent,
-    showVersions, setShowVersions, saving, lastGenStats, saveStatus,
+    showVersions, setShowVersions, saving, lastGenStats, saveStatus, saveRetrying,
     qualityScore, scoring, templates, selectedTemplate, setSelectedTemplate,
     autoScore, setAutoScore, scoreThreshold, setScoreThreshold,
     costEstimate, showCostConfirm, setShowCostConfirm,
@@ -486,7 +549,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     applyRefineSuggestion, dismissRefineSuggestion,
   }), [
     chapterOutline, chapter, versions, content, loading, selectedModel, generating,
-    streamingContent, showVersions, saving, lastGenStats, saveStatus,
+    streamingContent, showVersions, saving, lastGenStats, saveStatus, saveRetrying,
     qualityScore, scoring, templates, selectedTemplate, autoScore,
     scoreThreshold, costEstimate, showCostConfirm, compareVersions,
     diffData, multiRound, currentRound, consistencyResult,

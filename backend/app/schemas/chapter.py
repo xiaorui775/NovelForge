@@ -24,6 +24,7 @@ class ChapterResponse(BaseModel):
 
 class ChapterUpdate(BaseModel):
     content: str
+    auto_save: bool = False
 
 
 class ChapterGenerateRequest(BaseModel):

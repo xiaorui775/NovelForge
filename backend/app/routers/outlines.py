@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +18,8 @@ from app.schemas.outline import (
 from app.services.outline_service import OutlineService
 
 router = APIRouter(tags=["outlines"])
+
+logger = logging.getLogger(__name__)
 
 
 class ModelIdRequest(BaseModel):
@@ -171,4 +174,5 @@ async def generate_outline(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.exception(f"Failed to generate outline for project {project_id}")
         raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")

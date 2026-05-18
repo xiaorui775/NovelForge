@@ -437,7 +437,7 @@ export default function ChapterEditor() {
         <div className="flex items-center justify-between px-6 py-2 border-t border-study-border/20">
           <div className="flex items-center gap-4">
             <span className="text-[10px] text-parchment-dim/30">
-              {s.saveStatus === 'saved' ? '已保存' : s.saveStatus === 'saving' ? '保存中...' : '未保存'}
+              {s.saveStatus === 'saved' ? '已保存' : s.saveStatus === 'saving' ? '保存中...' : s.saveRetrying ? '保存失败，重试中...' : '未保存'}
             </span>
             {s.generating && (
               <span className="text-[10px] text-ink/60 animate-pulse">AI 生成中...</span>
@@ -542,6 +542,7 @@ export default function ChapterEditor() {
 
           <EditorStatusBar
             saveStatus={s.saveStatus}
+            saveRetrying={s.saveRetrying}
             wordCount={s.wordCount}
             chapter={s.chapter}
             models={s.models}

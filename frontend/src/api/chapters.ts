@@ -30,6 +30,7 @@ export interface ChapterVersion {
 
 export interface ChapterUpdate {
   content: string;
+  auto_save?: boolean;
 }
 
 export interface ChapterGenerateRequest {

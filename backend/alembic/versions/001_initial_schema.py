@@ -1,8 +1,8 @@
-"""initial schema
+"""initial schema (consolidated)
 
 Revision ID: 001
 Revises:
-Create Date: 2026-05-01
+Create Date: 2026-05-18
 
 """
 from typing import Sequence, Union
@@ -27,9 +27,11 @@ def upgrade() -> None:
         sa.Column('base_url', sa.String(500), nullable=False),
         sa.Column('api_key_encrypted', sa.Text, nullable=False),
         sa.Column('model_name', sa.String(100), nullable=False),
+        sa.Column('model_type', sa.String(20), nullable=False, server_default='chat'),
         sa.Column('input_cost_per_1k', sa.Numeric(10, 6), server_default='0'),
         sa.Column('output_cost_per_1k', sa.Numeric(10, 6), server_default='0'),
         sa.Column('max_tokens', sa.Integer, server_default='4096'),
+        sa.Column('max_context_tokens', sa.Integer, server_default='8192'),
         sa.Column('is_active', sa.Boolean, server_default='true'),
         sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
@@ -93,6 +95,8 @@ def upgrade() -> None:
         sa.Column('status', sa.String(20), server_default='draft'),
         sa.Column('style_reference', sa.Text),
         sa.Column('dialogue_ratio', sa.Numeric(3, 2), server_default='0.40'),
+        sa.Column('tags', postgresql.JSONB, server_default='[]'),
+        sa.Column('deleted_at', sa.DateTime),
         sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
     )
@@ -117,6 +121,7 @@ def upgrade() -> None:
         sa.Column('title', sa.String(200)),
         sa.Column('summary', sa.Text, nullable=False),
         sa.Column('detail_outline', sa.Text),
+        sa.Column('chapter_memo', sa.Text),
         sa.Column('sort_order', sa.Integer, nullable=False),
         sa.Column('status', sa.String(20), server_default='pending'),
         sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
@@ -139,12 +144,13 @@ def upgrade() -> None:
     op.create_table(
         'chapters',
         sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column('chapter_outline_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapter_outlines.id')),
+        sa.Column('chapter_outline_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapter_outlines.id', ondelete='CASCADE'), nullable=False),
         sa.Column('content', sa.Text),
         sa.Column('word_count', sa.Integer, server_default='0'),
         sa.Column('model_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('model_configs.id')),
         sa.Column('token_used', sa.Integer, server_default='0'),
         sa.Column('cost', sa.Numeric(10, 4), server_default='0'),
+        sa.Column('content_summary', sa.Text),
         sa.Column('status', sa.String(20), server_default='empty'),
         sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
@@ -161,6 +167,8 @@ def upgrade() -> None:
         sa.Column('model_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('model_configs.id')),
         sa.Column('token_used', sa.Integer, server_default='0'),
         sa.Column('quality_score', sa.Numeric(3, 1)),
+        sa.Column('change_type', sa.String(30), nullable=False, server_default='ai_generate'),
+        sa.Column('diff_snapshot', sa.Text),
         sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
     )
 
@@ -180,7 +188,7 @@ def upgrade() -> None:
     op.create_table(
         'generation_logs',
         sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column('chapter_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapters.id')),
+        sa.Column('chapter_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapters.id', ondelete='CASCADE')),
         sa.Column('model_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('model_configs.id')),
         sa.Column('prompt_template_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('prompt_templates.id')),
         sa.Column('status', sa.String(20), server_default='pending'),
@@ -205,6 +213,124 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
     )
 
+    # foreshadowings
+    op.create_table(
+        'foreshadowings',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('project_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('projects.id', ondelete='CASCADE'), nullable=False, index=True),
+        sa.Column('description', sa.Text, nullable=False),
+        sa.Column('plant_chapter_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapter_outlines.id', ondelete='SET NULL')),
+        sa.Column('resolution_chapter_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapter_outlines.id', ondelete='SET NULL')),
+        sa.Column('status', sa.String(20), nullable=False, server_default='open'),
+        sa.Column('notes', sa.Text),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+        sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # chat_messages
+    op.create_table(
+        'chat_messages',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('project_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('projects.id', ondelete='CASCADE'), nullable=False, index=True),
+        sa.Column('role', sa.String(20), nullable=False),
+        sa.Column('content', sa.Text, nullable=False),
+        sa.Column('model_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('model_configs.id', ondelete='SET NULL')),
+        sa.Column('token_used', sa.Integer, server_default='0'),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # cover_images
+    op.create_table(
+        'cover_images',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('project_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('projects.id', ondelete='CASCADE'), nullable=False, index=True),
+        sa.Column('image_url', sa.Text, nullable=False),
+        sa.Column('prompt', sa.Text, nullable=False),
+        sa.Column('revised_prompt', sa.Text),
+        sa.Column('model_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('model_configs.id', ondelete='SET NULL')),
+        sa.Column('style', sa.String(50)),
+        sa.Column('is_selected', sa.Boolean, server_default='false'),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # project_notes
+    op.create_table(
+        'project_notes',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('project_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('projects.id', ondelete='CASCADE'), nullable=False),
+        sa.Column('title', sa.String(200), nullable=False),
+        sa.Column('content', sa.Text, nullable=False, server_default=''),
+        sa.Column('category', sa.String(50), nullable=False, server_default='general'),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+        sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # character_appearances
+    op.create_table(
+        'character_appearances',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('character_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('characters.id', ondelete='CASCADE'), nullable=False),
+        sa.Column('chapter_outline_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapter_outlines.id', ondelete='CASCADE'), nullable=False),
+        sa.Column('role_in_chapter', sa.String(50), nullable=False, server_default='minor'),
+        sa.Column('notes', sa.Text, nullable=False, server_default=''),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # story_bible
+    op.create_table(
+        'story_bible',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('project_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('projects.id', ondelete='CASCADE'), nullable=False),
+        sa.Column('category', sa.String(50), nullable=False, server_default='custom'),
+        sa.Column('title', sa.String(200), nullable=False),
+        sa.Column('content', sa.Text, nullable=False, server_default=''),
+        sa.Column('tags', sa.Text, server_default=''),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+        sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # writing_goals
+    op.create_table(
+        'writing_goals',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('project_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('projects.id', ondelete='CASCADE'), nullable=False),
+        sa.Column('type', sa.String(30), nullable=False, server_default='daily_words'),
+        sa.Column('target', sa.Integer, nullable=False, server_default='0'),
+        sa.Column('start_date', sa.Date, nullable=False),
+        sa.Column('end_date', sa.Date, nullable=False),
+        sa.Column('notes', sa.Text, nullable=False, server_default=''),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+        sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # scenes
+    op.create_table(
+        'scenes',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('chapter_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('chapters.id', ondelete='CASCADE'), nullable=False),
+        sa.Column('scene_number', sa.Integer, nullable=False),
+        sa.Column('location', sa.String(200), nullable=False, server_default=''),
+        sa.Column('time', sa.String(200), nullable=False, server_default=''),
+        sa.Column('pov_character_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('characters.id')),
+        sa.Column('summary', sa.Text, nullable=False, server_default=''),
+        sa.Column('mood', sa.String(100), nullable=False, server_default=''),
+        sa.Column('notes', sa.Text, nullable=False, server_default=''),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+        sa.Column('updated_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
+    # story_templates
+    op.create_table(
+        'story_templates',
+        sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column('name', sa.String(100), nullable=False),
+        sa.Column('description', sa.Text, nullable=False),
+        sa.Column('structure', postgresql.JSONB, nullable=False),
+        sa.Column('genre_hint', sa.String(100), nullable=False, server_default=''),
+        sa.Column('is_builtin', sa.Boolean, nullable=False, server_default='false'),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now()),
+    )
+
     # Indexes
     op.create_index('idx_chapters_outline', 'chapters', ['chapter_outline_id'])
     op.create_index('idx_chapter_outlines_outline', 'chapter_outlines', ['outline_id'])
@@ -215,17 +341,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_table('cost_budgets')
-    op.drop_table('generation_logs')
-    op.drop_table('terminologies')
-    op.drop_table('chapter_versions')
-    op.drop_table('chapters')
-    op.drop_table('prompt_templates')
-    op.drop_table('chapter_outlines')
-    op.drop_table('outlines')
-    op.drop_table('projects')
-    op.drop_table('character_relations')
-    op.drop_table('worldview_characters')
-    op.drop_table('characters')
-    op.drop_table('worldviews')
-    op.drop_table('model_configs')
+    pass

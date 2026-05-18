@@ -5,13 +5,14 @@ type SaveStatus = 'saved' | 'saving' | 'unsaved';
 
 interface EditorStatusBarProps {
   saveStatus: SaveStatus;
+  saveRetrying?: boolean;
   wordCount: number;
   chapter: Chapter | null;
   models: ModelConfig[];
   lastGenStats: { token_used?: number; cost?: number; duration_ms?: number } | null;
 }
 
-export default function EditorStatusBar({ saveStatus, wordCount, chapter, models, lastGenStats }: EditorStatusBarProps) {
+export default function EditorStatusBar({ saveStatus, saveRetrying, wordCount, chapter, models, lastGenStats }: EditorStatusBarProps) {
   return (
     <>
       <div className="flex items-center justify-between mt-3 px-1">
@@ -36,8 +37,10 @@ export default function EditorStatusBar({ saveStatus, wordCount, chapter, models
             )}
             {saveStatus === 'unsaved' && (
               <>
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400/60" />
-                <span className="text-amber-400/50">未保存</span>
+                <span className={`w-1.5 h-1.5 rounded-full ${saveRetrying ? 'bg-blue-400/60 animate-pulse' : 'bg-amber-400/60'}`} />
+                <span className={saveRetrying ? 'text-blue-400/50' : 'text-amber-400/50'}>
+                  {saveRetrying ? '重试中...' : '未保存'}
+                </span>
               </>
             )}
           </span>

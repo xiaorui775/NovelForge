@@ -120,7 +120,7 @@ async def update_chapter(
     chapter.word_count = len(new_content)
     chapter.status = "completed" if new_content else "empty"
 
-    if old_content != new_content:
+    if old_content != new_content and not data.auto_save:
         version_count_result = await db.execute(
             select(ChapterVersion).where(ChapterVersion.chapter_id == chapter_id)
         )

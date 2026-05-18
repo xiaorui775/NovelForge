@@ -13,6 +13,8 @@ from app.models.note import ProjectNote
 from app.models.character_appearance import CharacterAppearance
 from app.models.story_bible import StoryBible
 from app.models.writing_goal import WritingGoal
+from app.models.scene import Scene
+from app.models.story_template import StoryTemplate
 
 __all__ = [
     "ModelConfig",
@@ -36,4 +38,6 @@ __all__ = [
     "CharacterAppearance",
     "StoryBible",
     "WritingGoal",
+    "Scene",
+    "StoryTemplate",
 ]

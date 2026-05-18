@@ -44,4 +44,6 @@ storage/
 
 # Logs
 *.log
-.claude/settings.json
+
+# Claude Code
+.claude/

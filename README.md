@@ -54,9 +54,9 @@ NovelForge/
 │   └── nginx/             # 前端静态资源 nginx 配置
 ├── backend/               # FastAPI 后端
 │   ├── app/
-│   │   ├── routers/       # 路由层（22 个模块）
+│   │   ├── routers/       # 路由层（23 个模块）
 │   │   ├── services/      # 业务逻辑层（27 个服务）
-│   │   ├── models/        # SQLAlchemy ORM（18 个模型，UUID 主键）
+│   │   ├── models/        # SQLAlchemy ORM（20 个模型，UUID 主键）
 │   │   ├── schemas/       # Pydantic 请求/响应模型
 │   │   ├── adapters/      # AI 模型适配器
 │   │   └── utils/         # 工具类（加密等）
@@ -238,6 +238,7 @@ Project → Outline → ChapterOutline → Chapter → ChapterVersion
 ## 版本历史与数据追踪
 
 - **章节版本**：每次 AI 生成创建 `ChapterVersion` 记录，支持恢复和对比
+- **自动保存**：编辑器 2 秒防抖自动保存，失败后指数退避重试（3s/6s/12s），页面关闭或崩溃时 localStorage 保护未保存内容
 - **生成日志**：`GenerationLog` 记录每次生成的 token、费用、时长、质量评分
 - **费用预算**：月度预算控制，生成前费用预估确认
 - **数据验证**：自动检查生成内容质量，可选自动修改
