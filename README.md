@@ -101,12 +101,18 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
+# 配置本地后端环境变量（注意是 backend 目录下的 .env，不是根目录的）
+cp .env.example .env
+# 编辑 .env，设置 DATABASE_URL、ENCRYPTION_KEY 等
+
 # 运行数据库迁移
 alembic upgrade head
 
 # 启动开发服务器
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+> 根目录的 `.env.example` 供 Docker Compose 使用，本地开发需使用 `backend/.env.example`。
 
 后端 API 文档：http://localhost:8000/docs
 
