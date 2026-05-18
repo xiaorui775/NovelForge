@@ -2,6 +2,7 @@ import json
 import time
 import uuid
 import difflib
+import logging
 from decimal import Decimal
 from typing import Optional, AsyncGenerator
 
@@ -25,6 +26,8 @@ from app.models.story_bible import StoryBible
 from app.models.worldview import Worldview
 from app.services.cost_budget_service import CostBudgetService
 from app.services.quality_service import QualityService
+
+logger = logging.getLogger(__name__)
 
 
 class GenerationService:
@@ -87,8 +90,8 @@ class GenerationService:
                 characters = list(wv.characters)
 
         if not characters:
-            result = await self.db.execute(select(Character))
-            characters = list(result.scalars().all())
+            # 无世界观关联时，不加载全部角色，避免跨项目污染
+            characters = []
 
         # 按大纲文本过滤相关角色（避免无关角色浪费预算）
         if outline_text and characters:
@@ -451,8 +454,8 @@ class GenerationService:
 
             if created_any:
                 await self.db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"_deposit_story_bible_draft failed: {e}", exc_info=True)
 
     @staticmethod
     def _build_diff_snapshot(old_content: str, new_content: str) -> str:
@@ -680,6 +683,14 @@ class GenerationService:
                 # 生成完成
                 full_content = "".join(content_parts)
                 word_count = len(full_content)
+
+                if not full_content or len(full_content.strip()) < 50:
+                    yield json.dumps({
+                        "type": "error",
+                        "message": "生成内容为空或过短，LLM 未返回有效内容，请检查模型配置和网络连接",
+                    }, ensure_ascii=False)
+                    return
+
                 duration_ms = int((time.time() - start_time) * 1000)
 
                 # 保存到数据库
@@ -791,7 +802,48 @@ class GenerationService:
                         word_count = len(full_content)
                         chapter.content = full_content
                         chapter.word_count = word_count
-                        chapter.token_used = adapter.count_tokens(full_content)
+                        extend_token_used = adapter.count_tokens(full_content)
+                        chapter.token_used = extend_token_used
+
+                        # 续写费用
+                        extend_input_tokens = adapter.count_tokens(
+                            extend_prompt[0]["content"] + extend_prompt[1]["content"]
+                        )
+                        input_rate, output_rate = self._get_effective_rates(model_config)
+                        extend_cost = input_rate * extend_input_tokens / 1000 + output_rate * extend_token_used / 1000
+                        chapter.cost = (chapter.cost or Decimal("0")) + Decimal(str(round(extend_cost, 6)))
+                        await budget_service.record_cost(Decimal(str(round(extend_cost, 6))))
+
+                        # 续写版本记录
+                        version_count_result = await self.db.execute(
+                            select(ChapterVersion).where(ChapterVersion.chapter_id == chapter_id)
+                        )
+                        versions = list(version_count_result.scalars().all())
+                        version = ChapterVersion(
+                            chapter_id=chapter_id,
+                            version_number=len(versions) + 1,
+                            content=full_content,
+                            word_count=word_count,
+                            model_id=model_id,
+                            token_used=extend_token_used,
+                            change_type="ai_generate",
+                            diff_snapshot=self._build_diff_snapshot(previous_content, full_content),
+                        )
+                        self.db.add(version)
+
+                        # 续写生成日志
+                        log = GenerationLog(
+                            chapter_id=chapter_id,
+                            model_id=model_id,
+                            status="completed",
+                            token_input=extend_input_tokens,
+                            token_output=extend_token_used,
+                            cost=round(extend_cost, 6),
+                            duration_ms=0,
+                            retry_count=0,
+                        )
+                        self.db.add(log)
+
                         await self.db.commit()
                         yield json.dumps({
                             "type": "status",
@@ -935,6 +987,13 @@ class GenerationService:
             yield json.dumps({"type": "error", "message": "模型不存在"})
             return
 
+        # 检查预算
+        budget_service = CostBudgetService(self.db)
+        budget_check = await budget_service.check_budget()
+        if not budget_check["allowed"]:
+            yield json.dumps({"type": "error", "message": "当月费用预算已用完，请在费用管理中调整预算"})
+            return
+
         # 构建续写 prompt（带完整上下文）
         existing_content = chapter.content
         previous_content = existing_content or ""
@@ -1019,6 +1078,14 @@ class GenerationService:
 
             # 生成完成
             new_content = "".join(content_parts)
+
+            if not new_content or len(new_content.strip()) < 50:
+                yield json.dumps({
+                    "type": "error",
+                    "message": "续写内容为空或过短，LLM 未返回有效内容，请检查模型配置和网络连接",
+                }, ensure_ascii=False)
+                return
+
             full_content = existing_content + new_content
             word_count = len(full_content)
             duration_ms = int((time.time() - start_time) * 1000)
@@ -1605,6 +1672,14 @@ class GenerationService:
                     }, ensure_ascii=False)
 
                 round_content = "".join(round_content_parts)
+
+                if not round_content or len(round_content.strip()) < 50:
+                    yield json.dumps({
+                        "type": "error",
+                        "message": f"{round_info['label']}生成内容为空或过短，LLM 未返回有效内容，请检查模型配置和网络连接",
+                    }, ensure_ascii=False)
+                    return
+
                 round_tokens = adapter.count_tokens(round_content)
 
                 # 计算费用

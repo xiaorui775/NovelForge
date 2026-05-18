@@ -1,4 +1,5 @@
 import client from './client';
+import { streamSSE } from './sse';
 
 export interface ChatMessage {
   id: string;
@@ -15,6 +16,7 @@ export interface ChatRequest {
   model_id: string;
 }
 
+// Chat-specific SSE event (uses same structure as base SSE event)
 export interface ChatSSEEvent {
   type: 'token' | 'done' | 'error';
   content?: string;
@@ -32,59 +34,12 @@ export const chatApi = {
     data: ChatRequest,
     onEvent: (event: ChatSSEEvent) => void,
   ): AbortController => {
-    const controller = new AbortController();
-
-    fetch(`/api/projects/${projectId}/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          const errBody = await response.json().catch(() => null);
-          throw new Error(errBody?.detail || `HTTP ${response.status}`);
-        }
-
-        const reader = response.body?.getReader();
-        if (!reader) { onEvent({ type: 'error', message: '无法读取响应流' }); return; }
-
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let receivedDone = false;
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const event = JSON.parse(line.slice(6));
-                if (event.type === 'done') receivedDone = true;
-                onEvent(event);
-              } catch {
-                // Skip malformed events
-              }
-            }
-          }
-        }
-
-        if (!receivedDone) {
-          onEvent({ type: 'error', message: '对话流意外中断' });
-        }
-      })
-      .catch((err) => {
-        if (err.name !== 'AbortError') {
-          onEvent({ type: 'error', message: err.message });
-        }
-      });
-
-    return controller;
+    return streamSSE({
+      url: `/api/projects/${projectId}/chat`,
+      payload: data,
+      onEvent: (e) => onEvent(e as ChatSSEEvent),
+      interruptedMessage: '对话流意外中断',
+    });
   },
 
   clearHistory: (projectId: string) =>

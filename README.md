@@ -45,22 +45,28 @@ AI 驱动的小说创作工具，面向个人创作者。从大纲构思到章�
 NovelForge/
 ├── frontend/              # React 前端
 │   ├── src/
-│   │   ├── api/           # API 请求模块（章节使用 SSE 流式）
+│   │   ├── api/           # API 请求模块（统一 SSE 流式实现）
 │   │   ├── stores/        # Zustand 状态管理
 │   │   ├── components/    # 通用组件
 │   │   └── pages/         # 页面组件（20+ 路由）
-│   └── Dockerfile
+│   ├── Dockerfile         # 开发环境 Dockerfile
+│   ├── Dockerfile.prod    # 生产环境 Dockerfile（多阶段构建）
+│   └── nginx/             # 前端静态资源 nginx 配置
 ├── backend/               # FastAPI 后端
 │   ├── app/
-│   │   ├── routers/       # 路由层（20 个模块）
-│   │   ├── services/      # 业务逻辑层（25 个服务）
-│   │   ├── models/        # SQLAlchemy ORM（17 个模型，UUID 主键）
+│   │   ├── routers/       # 路由层（22 个模块）
+│   │   ├── services/      # 业务逻辑层（27 个服务）
+│   │   ├── models/        # SQLAlchemy ORM（18 个模型，UUID 主键）
 │   │   ├── schemas/       # Pydantic 请求/响应模型
 │   │   ├── adapters/      # AI 模型适配器
 │   │   └── utils/         # 工具类（加密等）
-│   ├── migrations/        # Alembic 数据库迁移
-│   └── Dockerfile
-└── nginx/                 # Nginx 反向代理配置
+│   ├── alembic/           # Alembic 数据库迁移
+│   ├── Dockerfile         # 后端 Dockerfile
+│   ├── requirements.txt   # 运行依赖（锁定版本）
+│   └── requirements-dev.txt # 开发依赖（测试、lint）
+├── nginx/                 # Nginx 反向代理配置
+├── docker-compose.yml     # Docker Compose 编排
+└── .env.example           # 环境变量示例
 ```
 
 ## 快速开始
@@ -114,15 +120,50 @@ pnpm dev
 
 访问 http://localhost:3000
 
-### Docker 部署（规划中）
+### Docker 部署
 
-Docker Compose 配置正在完善中，届时可通过以下命令一键启动：
+推荐使用 Docker Compose 一键部署完整服务栈（PostgreSQL + Backend + Frontend + Nginx）：
 
 ```bash
-docker-compose up
+# 1. 配置环境变量
+cp .env.example .env
+# 编辑 .env，设置：
+# - DB_PASSWORD: PostgreSQL 密码
+# - ENCRYPTION_KEY: Fernet 加密密钥（用于 API key 加密）
+#   生成命令: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# 2. 一键启动所有服务
+docker-compose up -d
+
+# 3. 查看服务状态
+docker-compose ps
 ```
 
-服务包含：PostgreSQL、FastAPI 后端、React 前端、Nginx 反向代理。
+**服务说明**：
+- `postgres` — PostgreSQL 16 数据库（端口 5432）
+- `backend` — FastAPI 后端服务（端口 8000，内部通信）
+- `frontend` — React 前端静态资源服务（端口 3000，内部通信）
+- `nginx` — 反向代理（端口 80），统一入口：
+  - `/` → 前端
+  - `/api/` → 后端（SSE 流式支持已配置）
+
+**首次启动后**：
+- 访问 http://localhost（或服务器 IP）
+- 数据库迁移和种子数据自动执行
+- 默认 Prompt 模板和示例数据自动创建
+
+**停止服务**：
+```bash
+docker-compose down
+# 清理数据卷（慎用）
+docker-compose down -v
+```
+
+**生产部署建议**：
+- 配置 HTTPS（修改 `nginx/nginx.conf` 添加 SSL 证书）
+- 调整 PostgreSQL 密码为强密码
+- 设置 `DEBUG=false` 和适当的 `LOG_LEVEL`
+- 配置定期数据库备份
 
 ## 开发命令
 
@@ -141,11 +182,22 @@ pnpm test:e2e     # Playwright 端到端测试
 
 ```bash
 uvicorn app.main:app --reload    # 开发服务器
-pytest                           # 运行测试
+pytest                           # 运行测试（需要安装 requirements-dev.txt）
+pip install -r requirements-dev.txt  # 安装开发依赖
 ruff check .                     # Lint
 ruff format .                    # 格式化
 alembic upgrade head             # 执行迁移
 alembic revision --autogenerate -m "描述"  # 创建新迁移
+```
+
+### Docker
+
+```bash
+docker-compose up -d             # 启动所有服务（后台运行）
+docker-compose ps                # 查看服务状态
+docker-compose logs -f backend   # 查看后端日志
+docker-compose down              # 停止所有服务
+docker-compose down -v           # 停止并删除数据卷（清理数据库）
 ```
 
 ## 架构设计
@@ -162,9 +214,10 @@ Project → Outline → ChapterOutline → Chapter → ChapterVersion
 
 章节生成使用 Server-Sent Events 实现流式输出：
 
-- 后端：`StreamingResponse(text/event-stream)`
-- 前端：解析 `data:` 前缀的 JSON 事件
-- 事件类型：`token`、`done`、`error`、`batch_start`、`batch_next`、`batch_done`
+- **后端**：`StreamingResponse(text/event-stream)`
+- **前端**：统一 SSE 工具函数 `frontend/src/api/sse.ts`，解析 `data:` 前缀的 JSON 事件
+- **事件类型**：`token`、`done`、`error`、`batch_start`、`batch_next`、`batch_done`、`round_start`、`round_token`、`round_complete`
+- **支持场景**：章节生成、续写、批量生成、AI 聊天、改写、精修、头脑风暴
 
 ### AI 适配器模式
 
@@ -176,9 +229,18 @@ Project → Outline → ChapterOutline → Chapter → ChapterVersion
 
 ## 界面风格
 
-- 暗色主题：背景 `#1a1a2e`、卡片 `#16213e`、强调色 `#e94560`
-- TailwindCSS + 自定义工具类（`.btn-primary`、`.card`、`.input`）
-- 中文界面
+- **暗色主题**："书房"美学，背景 `#1c1915`、卡片 `#242019`、强调色 `#c9a96e`（琥珀金）
+- **TailwindCSS** + 自定义工具类（`.btn-primary`、`.btn-secondary`、`.btn-ghost`、`.card`、`.input`）
+- **字体**：Playfair Display + Noto Serif SC（标题）、DM Sans + Noto Sans SC（正文）
+- **动画**：Framer Motion 入场动画、`glowPulse` 呼吸效果
+- **中文界面**
+
+## 版本历史与数据追踪
+
+- **章节版本**：每次 AI 生成创建 `ChapterVersion` 记录，支持恢复和对比
+- **生成日志**：`GenerationLog` 记录每次生成的 token、费用、时长、质量评分
+- **费用预算**：月度预算控制，生成前费用预估确认
+- **数据验证**：自动检查生成内容质量，可选自动修改
 
 ## 许可
 

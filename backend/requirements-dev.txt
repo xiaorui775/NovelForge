@@ -1,0 +1,4 @@
+# Development dependencies (testing, linting, formatting)
+pytest==8.0.0
+pytest-asyncio==0.23.0
+ruff==0.3.0

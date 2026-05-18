@@ -1,4 +1,5 @@
 import client from './client';
+import { streamSSE } from './sse';
 
 export interface Chapter {
   id: string;
@@ -66,35 +67,13 @@ export interface SSEConflict {
 }
 
 export interface SSEEvent {
-  type:
-    | 'token'
-    | 'progress'
-    | 'done'
-    | 'error'
-    | 'scored'
-    | 'low_score'
-    | 'score_error'
-    | 'retrying'
-    | 'round_start'
-    | 'round_token'
-    | 'round_complete'
-    | 'batch_start'
-    | 'batch_next'
-    | 'batch_done'
-    | 'validation'
-    | 'status'
-    | 'refine_start'
-    | 'refine_suggestion'
-    | 'conflicts'
-    | 'brainstorm_start'
-    | 'brainstorm_direction'
-    | 'brainstorm_transition_token';
+  type: string;
   content?: string;
+  message?: string;
   word_count?: number;
   token_used?: number;
   cost?: number;
   duration_ms?: number;
-  message?: string;
   score?: number;
   retry_count?: number;
   threshold?: number;
@@ -188,69 +167,7 @@ export interface ChapterBrainstormResponse {
   transition_text: string | null;
 }
 
-function streamSSE(
-  url: string,
-  payload: unknown,
-  onEvent: (event: SSEEvent) => void,
-  interruptedMessage: string,
-): AbortController {
-  const controller = new AbortController();
-
-  fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: controller.signal,
-  })
-    .then(async (response) => {
-      if (!response.ok) {
-        const errBody = await response.json().catch(() => null);
-        throw new Error(errBody?.detail || `HTTP ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        onEvent({ type: 'error', message: '无法读取响应流' });
-        return;
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let receivedDone = false;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          try {
-            const event = JSON.parse(line.slice(6)) as SSEEvent;
-            if (event.type === 'done') receivedDone = true;
-            onEvent(event);
-          } catch {
-            // Skip malformed events
-          }
-        }
-      }
-
-      if (!receivedDone) {
-        onEvent({ type: 'error', message: interruptedMessage });
-      }
-    })
-    .catch((err) => {
-      if (err.name !== 'AbortError') {
-        onEvent({ type: 'error', message: err.message });
-      }
-    });
-
-  return controller;
-}
-
+// Use unified streamSSE from sse.ts
 export const chaptersApi = {
   getByOutline: (chapterOutlineId: string) =>
     client.get<Chapter>(`/chapter-outlines/${chapterOutlineId}/chapter`),
@@ -294,13 +211,28 @@ export const chaptersApi = {
     client.get<ContextUsage>(`/chapters/${chapterId}/context-usage?model_id=${modelId}`),
 
   generate: (chapterId: string, data: ChapterGenerateRequest, onEvent: (event: SSEEvent) => void): AbortController =>
-    streamSSE(`/api/chapters/${chapterId}/generate`, data, onEvent, '生成流意外中断'),
+    streamSSE({
+      url: `/api/chapters/${chapterId}/generate`,
+      payload: data,
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: '生成流意外中断',
+    }),
 
   continueWriting: (chapterId: string, data: ChapterGenerateRequest, onEvent: (event: SSEEvent) => void): AbortController =>
-    streamSSE(`/api/chapters/${chapterId}/continue`, data, onEvent, '续写流意外中断'),
+    streamSSE({
+      url: `/api/chapters/${chapterId}/continue`,
+      payload: data,
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: '续写流意外中断',
+    }),
 
   regenerate: (chapterId: string, data: ChapterGenerateRequest, onEvent: (event: SSEEvent) => void): AbortController =>
-    streamSSE(`/api/chapters/${chapterId}/regenerate`, data, onEvent, '重新生成流意外中断'),
+    streamSSE({
+      url: `/api/chapters/${chapterId}/regenerate`,
+      payload: data,
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: '重新生成流意外中断',
+    }),
 
   batchGenerate: (
     modelId: string,
@@ -308,58 +240,13 @@ export const chaptersApi = {
     onEvent: (event: SSEEvent) => void,
     onDone?: () => void,
   ): AbortController => {
-    const controller = new AbortController();
-
-    fetch('/api/chapters/batch-generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model_id: modelId, chapter_outline_ids: chapterOutlineIds }),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => null);
-          throw new Error(errorData?.detail || `HTTP ${response.status}`);
-        }
-
-        const reader = response.body?.getReader();
-        if (!reader) {
-          onDone?.();
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            try {
-              const event = JSON.parse(line.slice(6)) as SSEEvent;
-              onEvent(event);
-            } catch {
-              // Skip malformed events
-            }
-          }
-        }
-      })
-      .catch((err) => {
-        if (err.name !== 'AbortError') {
-          onEvent({ type: 'error', message: err.message });
-        }
-      })
-      .finally(() => {
-        onDone?.();
-      });
-
-    return controller;
+    return streamSSE({
+      url: '/api/chapters/batch-generate',
+      payload: { model_id: modelId, chapter_outline_ids: chapterOutlineIds },
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: undefined,
+      onDone,
+    });
   },
 
   rewriteSelection: (
@@ -367,19 +254,34 @@ export const chaptersApi = {
     data: { model_id: string; selected_text: string; instruction: string; context_before?: string; context_after?: string },
     onEvent: (event: SSEEvent) => void,
   ): AbortController =>
-    streamSSE(`/api/chapters/${chapterId}/rewrite-selection`, data, onEvent, '改写流意外中断'),
+    streamSSE({
+      url: `/api/chapters/${chapterId}/rewrite-selection`,
+      payload: data,
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: '改写流意外中断',
+    }),
 
   refine: (
     chapterId: string,
     data: { model_id: string; draft_text: string; max_suggestions?: number },
     onEvent: (event: SSEEvent) => void,
   ): AbortController =>
-    streamSSE(`/api/chapters/${chapterId}/refine`, data, onEvent, '精修流意外中断'),
+    streamSSE({
+      url: `/api/chapters/${chapterId}/refine`,
+      payload: data,
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: '精修流意外中断',
+    }),
 
   brainstorm: (
     chapterId: string,
     data: { model_id: string; selected_direction?: string },
     onEvent: (event: SSEEvent) => void,
   ): AbortController =>
-    streamSSE(`/api/chapters/${chapterId}/brainstorm`, data, onEvent, '脑暴流意外中断'),
+    streamSSE({
+      url: `/api/chapters/${chapterId}/brainstorm`,
+      payload: data,
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: '脑暴流意外中断',
+    }),
 };

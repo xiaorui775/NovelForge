@@ -478,7 +478,7 @@ export default function ChapterEditor() {
             沉浸模式
           </button>
           {s.versions.length > 0 && (
-            <button onClick={() => s.setShowVersions(!s.showVersions)} className="btn-ghost text-xs">
+            <button onClick={() => s.setShowVersions(!s.showVersions)} className="btn-ghost text-xs flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>

@@ -15,10 +15,7 @@ from app.database import async_session
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: create tables (dev convenience, use alembic in production)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    # Seed default prompt templates, sample data, and story templates
+    # Startup: seed default data (tables created by Alembic migrations)
     await seed_prompt_templates()
     await seed_sample_data()
     async with async_session() as session:
