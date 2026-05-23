@@ -49,5 +49,5 @@ export const foreshadowingApi = {
     client.delete(`/foreshadowings/${id}`),
 
   scan: (projectId: string, modelId: string) =>
-    client.post<ForeshadowingScanResult[]>(`/projects/${projectId}/foreshadowings/scan`, { model_id: modelId }),
+    client.post<ForeshadowingScanResult[]>(`/projects/${projectId}/foreshadowings/scan`, { model_id: modelId }, { timeout: 180000 }),
 };

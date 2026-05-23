@@ -45,9 +45,16 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   const [brainstorming, setBrainstorming] = useState(false);
   const [brainstormResult, setBrainstormResult] = useState<ChapterBrainstormResponse | null>(null);
   const [saveRetrying, setSaveRetrying] = useState(false);
+  const [previewMode, setPreviewMode] = useState(false);
+  const [previewVersionId, setPreviewVersionId] = useState<string | null>(null);
+  const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [temperature, setTemperature] = useState<number | null>(null);
+  const [topP, setTopP] = useState<number | null>(null);
+  const [shortContentPrompt, setShortContentPrompt] = useState<{ wordCount: number; target: number } | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const streamingContentRef = useRef('');
   const lastSavedContentRef = useRef('');
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savingRef = useRef(false);
@@ -145,6 +152,15 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
       if (saveStatus !== 'unsaved') setSaveStatus('saved');
       const { data: versionList } = await chaptersApi.listVersions(chapterRes.data.id);
       setVersions(versionList);
+      // Restore pending preview state after refresh
+      try {
+        const { data: previewVersion } = await chaptersApi.getLatestPreview(chapterRes.data.id);
+        setPreviewVersionId(previewVersion.id);
+        setPreviewContent(previewVersion.content);
+        setPreviewMode(true);
+      } catch {
+        // No pending preview — normal case, ignore 404
+      }
     } catch {
       showToast('error', '加载章节失败');
     }
@@ -208,6 +224,20 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     return () => window.removeEventListener('beforeunload', handler);
   }, [saveStatus, chapterOutlineId, content]);
 
+  // Auto-retry save when network comes back online
+  useEffect(() => {
+    const handler = () => {
+      if (saveStatus === 'unsaved' && chapter && contentRef.current !== lastSavedContentRef.current) {
+        retryCountRef.current = 0;
+        savingRef.current = false;
+        doAutoSave();
+        showToast('info', '网络已恢复，正在保存...');
+      }
+    };
+    window.addEventListener('online', handler);
+    return () => window.removeEventListener('online', handler);
+  }, [saveStatus, chapter, doAutoSave, showToast]);
+
   const doGenerate = useCallback(() => {
     if (!chapter || !selectedModel) return;
     setGenerating(true);
@@ -217,19 +247,23 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     setShowCostConfirm(false);
     setCurrentRound(null);
     setValidationIssues([]);
+    streamingContentRef.current = '';
 
     abortRef.current = chaptersApi.generate(
       chapter.id,
-      { model_id: selectedModel, template_id: selectedTemplate || undefined, auto_score: autoScore, score_threshold: scoreThreshold, multi_round: multiRound, auto_revise: autoRevise },
+      { model_id: selectedModel, template_id: selectedTemplate || undefined, auto_score: autoScore, score_threshold: scoreThreshold, multi_round: multiRound, auto_revise: autoRevise, preview: previewMode, temperature: temperature ?? undefined, top_p: topP ?? undefined },
       (event: SSEEvent) => {
         if (event.type === 'token' && event.content) {
-          setStreamingContent((prev) => prev + event.content);
+          streamingContentRef.current += event.content;
+          setStreamingContent(streamingContentRef.current);
         } else if (event.type === 'round_start') {
           setCurrentRound({ round: event.round || 0, label: event.round_label || '' });
+          streamingContentRef.current = '';
           setStreamingContent('');
           showToast('success', `开始${event.round_label}...`);
         } else if (event.type === 'round_token' && event.content) {
-          setStreamingContent((prev) => prev + event.content);
+          streamingContentRef.current += event.content;
+          setStreamingContent(streamingContentRef.current);
         } else if (event.type === 'round_complete') {
           showToast('success', `${event.round_label}完成，${event.word_count} 字`);
         } else if (event.type === 'scored') {
@@ -250,13 +284,21 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
           pushUndoSnapshot(content);
           setLastGenStats({ token_used: event.token_used, cost: event.cost, duration_ms: event.duration_ms });
           setSaveStatus('saved');
-          loadChapter();
+          if (previewMode && event.preview_version_id) {
+            setPreviewVersionId(event.preview_version_id);
+            setPreviewContent(streamingContentRef.current);
+          } else {
+            loadChapter();
+          }
+          streamingContentRef.current = '';
           const roundInfo = event.rounds ? `（${event.rounds} 轮生成）` : '';
           const scoreInfo = event.score ? `，评分 ${event.score.toFixed(1)}` : '';
-          showToast('success', `生成完成，共 ${event.word_count} 字${roundInfo}${scoreInfo}`);
-          sendNotification('NovelForge', `章节生成完成，共 ${event.word_count} 字`);
+          showToast('success', previewMode ? '预览生成完成，请查看并决定是否采纳' : `生成完成，共 ${event.word_count} 字${roundInfo}${scoreInfo}`);
+          if (!previewMode) sendNotification('NovelForge', `章节生成完成，共 ${event.word_count} 字`);
         } else if (event.type === 'validation' && event.issues) {
           setValidationIssues(event.issues);
+        } else if (event.type === 'short_content') {
+          setShortContentPrompt({ wordCount: event.word_count || 0, target: event.target || 0 });
         } else if (event.type === 'error') {
           setGenerating(false);
           setStreamingContent('');
@@ -265,7 +307,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
         }
       },
     );
-  }, [chapter, selectedModel, selectedTemplate, autoScore, scoreThreshold, multiRound, autoRevise, content, pushUndoSnapshot]);
+  }, [chapter, selectedModel, selectedTemplate, autoScore, scoreThreshold, multiRound, autoRevise, previewMode, content, pushUndoSnapshot, temperature, topP]);
 
   const handleGenerate = useCallback(async () => {
     if (!chapter || !selectedModel) return;
@@ -282,6 +324,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     if (!chapter || !selectedModel) return;
     setGenerating(true);
     setRefineSuggestions([]);
+    streamingContentRef.current = content;
     setStreamingContent(content);
     setLastGenStats(null);
     setValidationIssues([]);
@@ -291,7 +334,8 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
       { model_id: selectedModel },
       (event: SSEEvent) => {
         if (event.type === 'token' && event.content) {
-          setStreamingContent((prev) => prev + event.content);
+          streamingContentRef.current += event.content;
+          setStreamingContent(streamingContentRef.current);
         } else if (event.type === 'validation' && event.issues) {
           setValidationIssues(event.issues);
         } else if (event.type === 'conflicts') {
@@ -301,6 +345,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
           }
         } else if (event.type === 'done') {
           setGenerating(false);
+          streamingContentRef.current = '';
           setStreamingContent('');
           pushUndoSnapshot(content);
           setLastGenStats({ token_used: event.token_used, cost: event.cost, duration_ms: event.duration_ms });
@@ -310,6 +355,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
           sendNotification('NovelForge', `续写完成，共 ${event.word_count} 字`);
         } else if (event.type === 'error') {
           setGenerating(false);
+          streamingContentRef.current = '';
           setStreamingContent('');
           showToast('error', event.message || '续写失败');
         }
@@ -529,6 +575,40 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     return displayContent.trim() ? displayContent.trim().split(/\s+/).length : 0;
   }, [displayContent]);
 
+  const handleAdoptPreview = useCallback(async () => {
+    if (!chapter || !previewVersionId) return;
+    try {
+      const { data } = await chaptersApi.adoptVersion(chapter.id, previewVersionId);
+      setChapter(data);
+      setContent(data.content || '');
+      lastSavedContentRef.current = data.content || '';
+      setSaveStatus('saved');
+      setPreviewVersionId(null);
+      setPreviewContent(null);
+      setPreviewMode(false);
+      showToast('success', '已采纳预览版本');
+      // Reload versions list only, skip loadChapter to avoid re-detecting preview
+      try {
+        const { data: versionList } = await chaptersApi.listVersions(chapter.id);
+        setVersions(versionList);
+      } catch { /* ignore */ }
+    } catch {
+      showToast('error', '采纳失败');
+    }
+  }, [chapter, previewVersionId, showToast]);
+
+  const handleDiscardPreview = useCallback(async () => {
+    if (chapter && previewVersionId) {
+      try {
+        await chaptersApi.discardVersion(chapter.id, previewVersionId);
+      } catch { /* non-critical */ }
+    }
+    setPreviewVersionId(null);
+    setPreviewContent(null);
+    setPreviewMode(false);
+    showToast('success', '已丢弃预览版本');
+  }, [chapter, previewVersionId, showToast]);
+
   return useMemo(() => ({
     chapterOutline, chapter, versions, content, setContent,
     loading, selectedModel, setSelectedModel, generating, streamingContent,
@@ -542,11 +622,15 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     validationIssues, refining, refineSuggestions,
     brainstorming, brainstormResult,
     editorRef, displayContent, wordCount,
+    previewMode, setPreviewMode, previewVersionId, previewContent,
+    temperature, setTemperature, topP, setTopP,
+    shortContentPrompt, setShortContentPrompt,
     handleGenerate, handleContinue, handleRefine, handleBrainstorm, handleStop, handleSave,
     handleRestoreVersion, handleScore, toggleCompareVersion,
     handleCompare, handleConsistencyCheck, doGenerate, models,
     handleApplyRewrite, handleUndo, handleRedo, pushUndoSnapshot,
     applyRefineSuggestion, dismissRefineSuggestion,
+    handleAdoptPreview, handleDiscardPreview,
   }), [
     chapterOutline, chapter, versions, content, loading, selectedModel, generating,
     streamingContent, showVersions, saving, lastGenStats, saveStatus, saveRetrying,
@@ -556,8 +640,10 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     checkingConsistency, validationIssues, refining, refineSuggestions,
     brainstorming, brainstormResult,
     displayContent, wordCount, models, handleApplyRewrite, autoRevise,
+    previewMode, previewVersionId, previewContent, shortContentPrompt,
     handleUndo, handleRedo, handleGenerate, handleContinue, handleRefine,
     handleBrainstorm, handleSave, handleRestoreVersion, handleScore, handleCompare,
     handleConsistencyCheck, doGenerate, applyRefineSuggestion, dismissRefineSuggestion,
+    handleAdoptPreview, handleDiscardPreview,
   ]);
 }

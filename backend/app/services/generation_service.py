@@ -23,51 +23,37 @@ from app.models.scene import Scene
 from app.services.validation_service import ValidationService
 from app.models.terminology import Terminology
 from app.models.story_bible import StoryBible
+from app.models.chapter_summary import ChapterSummary
 from app.models.worldview import Worldview
 from app.services.cost_budget_service import CostBudgetService
 from app.services.quality_service import QualityService
+from app.services.common import load_chapter_chain, load_chapter_chain_with_model
+from app.utils.json_extract import extract_json
 
 logger = logging.getLogger(__name__)
 
 
 class GenerationService:
-    # 常见模型默认价格 (USD per 1K tokens)，当用户未配置价格时使用
-    DEFAULT_PRICING = {
-        "gpt-4": {"input": 0.03, "output": 0.06},
-        "gpt-4-turbo": {"input": 0.01, "output": 0.03},
-        "gpt-4o": {"input": 0.005, "output": 0.015},
-        "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
-        "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015},
-        "o1-mini": {"input": 0.003, "output": 0.012},
-        "o1-preview": {"input": 0.015, "output": 0.06},
-        "claude-3-opus": {"input": 0.015, "output": 0.075},
-        "claude-3-sonnet": {"input": 0.003, "output": 0.015},
-        "claude-3-haiku": {"input": 0.00025, "output": 0.00125},
-        "deepseek-chat": {"input": 0.00014, "output": 0.00028},
-        "deepseek-coder": {"input": 0.00014, "output": 0.00028},
-        "glm-4": {"input": 0.014, "output": 0.014},
-        "moonshot-v1-8k": {"input": 0.012, "output": 0.012},
-        "qwen-turbo": {"input": 0.0003, "output": 0.0006},
-        "qwen-plus": {"input": 0.004, "output": 0.012},
-        "qwen-max": {"input": 0.016, "output": 0.064},
-    }
 
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    def _get_effective_rates(self, model_config: ModelConfig) -> tuple:
-        """获取有效的输入/输出价格，如果配置为 0 则使用默认价格"""
-        input_rate = float(model_config.input_cost_per_1k)
-        output_rate = float(model_config.output_cost_per_1k)
-        if input_rate > 0 and output_rate > 0:
-            return input_rate, output_rate
-        # 尝试从默认价格表匹配
-        name = (model_config.model_name or "").lower()
-        for key, pricing in self.DEFAULT_PRICING.items():
-            if key in name:
-                return pricing["input"], pricing["output"]
-        # 最终兜底
-        return input_rate or 0.002, output_rate or 0.006
+    @staticmethod
+    def _calc_context_budget(model_config: ModelConfig, extra_chars: int = 0) -> Optional[int]:
+        """统一计算上下文字数预算
+
+        Args:
+            model_config: 模型配置
+            extra_chars: 额外需要预留的字符数（如续写时已有内容的尾部）
+        """
+        if not hasattr(model_config, 'max_context_tokens') or not model_config.max_context_tokens:
+            return None
+        # 1.8 倍：中文约 1.5 token/字，留 0.3 倍余量给 prompt 模板
+        return max(2000, int(model_config.max_context_tokens * 1.8) - extra_chars - 500)
+
+    @staticmethod
+    def _get_effective_rates(model_config: ModelConfig) -> tuple:
+        return CostBudgetService.get_effective_rates(model_config)
 
     @staticmethod
     def _truncate_to_budget(text: str, budget: int) -> str:
@@ -242,6 +228,8 @@ class GenerationService:
         return len(shorter) > 8 and shorter in longer
 
     async def _get_story_bible_context(self, project: Project, outline_text: str = "") -> tuple[str, list[StoryBible]]:
+        from datetime import datetime, timedelta
+
         result = await self.db.execute(
             select(StoryBible)
             .where(StoryBible.project_id == project.id)
@@ -251,6 +239,20 @@ class GenerationService:
         entries = list(result.scalars().all())
         if not entries:
             return "", []
+
+        # 过期淘汰：last_verified_chapter_id 为空且超过 30 天的条目降权（排到末尾）
+        stale_cutoff = datetime.utcnow() - timedelta(days=30)
+        verified = []
+        stale = []
+        for e in entries:
+            if e.last_verified_chapter_id:
+                verified.append(e)
+            elif e.created_at and e.created_at < stale_cutoff:
+                stale.append(e)
+            else:
+                verified.append(e)
+        # 已验证/较新的排前面，过期的排后面
+        entries = verified + stale
 
         import re
 
@@ -265,8 +267,9 @@ class GenerationService:
             if matched:
                 entries = matched
 
+        # 总上限降为 20
         lines = []
-        for e in entries[:12]:
+        for e in entries[:20]:
             title = (e.title or "").strip()
             content = (e.content or "").strip()
             if not title and not content:
@@ -278,7 +281,23 @@ class GenerationService:
                 line += f"（标签：{e.tags[:80]}）"
             lines.append(line)
 
-        return "\n".join(lines), entries[:12]
+        return "\n".join(lines), entries[:20]
+
+    async def _get_series_predecessor_context(self, project: Project) -> str:
+        """If this project is in a series and not the first book, return predecessor context text."""
+        if not project.series_id:
+            return ""
+        from app.services.series_service import SeriesService
+        svc = SeriesService(self.db)
+        ctx = await svc.get_predecessor_context(project.id)
+        if not ctx:
+            return ""
+        parts = []
+        if ctx.get("earlier_books_text"):
+            parts.append(ctx["earlier_books_text"])
+        if ctx.get("immediate_predecessor_text"):
+            parts.append(ctx["immediate_predecessor_text"])
+        return "\n".join(parts)
 
     async def _build_context_bundle(
         self,
@@ -287,6 +306,7 @@ class GenerationService:
         outline: Outline,
         chapter_id: Optional[uuid.UUID],
         context_budget: Optional[int],
+        model_config: Optional[ModelConfig] = None,
     ) -> dict:
         terminologies_result = await self.db.execute(
             select(Terminology).where(Terminology.project_id == project.id)
@@ -297,24 +317,65 @@ class GenerationService:
         prev_summaries = []
         prev_content_snippet = ""
         if chapter_outline.chapter_number > 1:
+            # 根据 context_budget 动态调整前章数量
+            max_prev = 8 if context_budget and context_budget >= 8000 else 5
             prev_result = await self.db.execute(
-                select(ChapterOutline, Chapter.content_summary, Chapter.content)
+                select(ChapterOutline, Chapter, ChapterSummary)
                 .outerjoin(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
+                .outerjoin(ChapterSummary, ChapterSummary.chapter_id == Chapter.id)
                 .where(
                     ChapterOutline.outline_id == outline.id,
                     ChapterOutline.chapter_number < chapter_outline.chapter_number,
                 )
                 .order_by(ChapterOutline.chapter_number.desc())
-                .limit(5)
+                .limit(max_prev)
             )
             prev_rows = list(prev_result.all())
-            for co, content_summary, _content in reversed(prev_rows):
-                summary = content_summary or co.summary
-                prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}: {summary}")
+
+            # 懒生成：对缺失或过期摘要的前章补生成
+            if model_config:
+                for co, ch, cs in prev_rows:
+                    if not ch or not ch.content or len(ch.content.strip()) < 100:
+                        continue
+                    need_generate = False
+                    if not cs and not ch.content_summary:
+                        need_generate = True
+                    elif cs and cs.is_stale:
+                        need_generate = True
+                    if need_generate:
+                        await self._generate_content_summary(ch, model_config)
+                        await self.db.refresh(ch)
+
+            # 衰减策略：根据前章数量动态梯度
+            # 8章：2完整 → 2压缩80字 → 2仅标题 → 2仅章节号
+            # 5章：2完整 → 1压缩80字 → 2仅标题
+            distance = 0
+            for co, ch, cs in reversed(prev_rows):
+                distance += 1
+                content_summary = ch.content_summary if ch else None
+                summary = content_summary or co.summary or ""
+                if distance <= 2:
+                    # 最近 2 章：完整摘要
+                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}: {summary}")
+                elif distance <= 4 and max_prev >= 8:
+                    # 第 3-4 章（8章模式）：压缩到 80 字
+                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}")
+                elif distance <= 3 and max_prev < 8:
+                    # 第 3 章（5章模式）：压缩到 80 字
+                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}")
+                elif distance <= 6 and max_prev >= 8:
+                    # 第 5-6 章（8章模式）：仅标题
+                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}")
+                elif distance <= 5 and max_prev < 8:
+                    # 第 4-5 章（5章模式）：仅标题
+                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}")
+                else:
+                    # 更远：仅章节号
+                    prev_summaries.append(f"第{co.chapter_number}章")
             if prev_rows:
-                _, _, nearest_content = prev_rows[0]
-                if nearest_content:
-                    prev_content_snippet = nearest_content[-500:]
+                nearest_ch = prev_rows[0][1]
+                if nearest_ch and nearest_ch.content:
+                    prev_content_snippet = nearest_ch.content[-500:]
 
         prev_summaries_text = "\n".join(prev_summaries) if prev_summaries else ""
 
@@ -324,6 +385,7 @@ class GenerationService:
         foreshadowings_text = await self._get_foreshadowings_context(project, chapter_outline.chapter_number)
         scenes_text = await self._get_scenes_context(chapter_id)
         story_bible_text, story_bible_entries = await self._get_story_bible_context(project, outline_text)
+        series_predecessor_text = await self._get_series_predecessor_context(project)
 
         conflicts = []
         if terminologies and story_bible_entries:
@@ -350,7 +412,7 @@ class GenerationService:
         if context_budget and context_budget > 0:
             sections = [
                 ("prev_content_snippet", prev_content_snippet, 500),
-                ("prev_summaries", prev_summaries_text, 1200),
+                ("prev_summaries", prev_summaries_text, 800),
                 ("detail_outline", chapter_outline.detail_outline or "", 1500),
                 ("scenes", scenes_text, 800),
                 ("terminologies", terms_text, 600),
@@ -358,6 +420,7 @@ class GenerationService:
                 ("characters", characters_text, 1200),
                 ("worldview", worldview_text, 600),
                 ("foreshadowings", foreshadowings_text, 700),
+                ("series_predecessor", series_predecessor_text, 800),
             ]
             total_raw = sum(len(s[1]) for s in sections)
             if total_raw > context_budget:
@@ -375,6 +438,7 @@ class GenerationService:
                 characters_text = adjusted["characters"]
                 worldview_text = adjusted["worldview"]
                 foreshadowings_text = adjusted["foreshadowings"]
+                series_predecessor_text = adjusted["series_predecessor"]
             else:
                 detail_outline = chapter_outline.detail_outline or ""
         else:
@@ -391,6 +455,7 @@ class GenerationService:
             "scenes_text": scenes_text,
             "story_bible_text": story_bible_text,
             "detail_outline": detail_outline,
+            "series_predecessor_text": series_predecessor_text,
             "conflicts": conflicts[:10],
         }
 
@@ -400,11 +465,14 @@ class GenerationService:
         chapter_outline: ChapterOutline,
         chapter_content: str,
         model_config: ModelConfig,
+        adapter=None,
+        chapter_id: uuid.UUID = None,
     ) -> None:
         if not chapter_content or len(chapter_content.strip()) < 200:
             return
         try:
-            adapter = AdapterFactory.create(model_config)
+            if adapter is None:
+                adapter = AdapterFactory.create(model_config)
             messages = [
                 {
                     "role": "system",
@@ -427,7 +495,7 @@ class GenerationService:
             async for token in adapter.generate_stream(messages, max_tokens=700):
                 parts.append(token)
             raw = "".join(parts).strip()
-            items = json.loads(raw)
+            items = extract_json(raw)
             if not isinstance(items, list):
                 return
 
@@ -441,21 +509,83 @@ class GenerationService:
                 tags = str(item.get("tags") or f"chapter-{chapter_outline.chapter_number}")[:300]
                 if not title or not content:
                     continue
-                self.db.add(
-                    StoryBible(
-                        project_id=project_id,
-                        category=category,
-                        title=title,
-                        content=content,
-                        tags=tags,
-                    )
+
+                # 去重：检查是否已有近似条目（精确标题匹配或模糊内容匹配）
+                existing_result = await self.db.execute(
+                    select(StoryBible).where(StoryBible.project_id == project_id, StoryBible.title == title)
                 )
+                existing = existing_result.scalar_one_or_none()
+
+                if not existing:
+                    # 尝试模糊匹配：同一分类下内容相似的条目
+                    similar_result = await self.db.execute(
+                        select(StoryBible).where(
+                            StoryBible.project_id == project_id,
+                            StoryBible.category == category,
+                        ).limit(20)
+                    )
+                    for sb in similar_result.scalars().all():
+                        if self._is_near_duplicate(content, sb.content):
+                            existing = sb
+                            break
+
+                if existing:
+                    existing.content = content
+                    existing.category = category
+                    existing.tags = tags
+                    if chapter_id:
+                        existing.last_verified_chapter_id = chapter_id
+                else:
+                    self.db.add(
+                        StoryBible(
+                            project_id=project_id,
+                            category=category,
+                            title=title,
+                            content=content,
+                            tags=tags,
+                            last_verified_chapter_id=chapter_id,
+                        )
+                    )
                 created_any = True
 
             if created_any:
                 await self.db.commit()
         except Exception as e:
             logger.warning(f"_deposit_story_bible_draft failed: {e}", exc_info=True)
+
+    @staticmethod
+    def _merge_revisions(draft: str, revision: str) -> str:
+        """将增量修改合并到初稿中。如果 revision 不含段落标记则直接返回 revision（完整重写降级）。"""
+        import re
+        # 检测是否有 [段落N] 标记
+        paragraph_markers = re.findall(r'^\[段落(\d+)\]', revision, re.MULTILINE)
+        if not paragraph_markers:
+            # 无标记 → AI 输出了完整章节，直接使用
+            return revision
+
+        # 按双换行拆分初稿段落
+        draft_paragraphs = draft.split('\n\n')
+        # 构建修改映射：段落编号 → 新内容
+        changes: dict[int, str] = {}
+        # 用正则逐段匹配 [段落N] 后面的内容（到下一个 [段落M] 或文末）
+        pattern = re.compile(r'\[段落(\d+)\]\s*\n?(.*?)(?=\[段落\d+\]|$)', re.DOTALL)
+        for match in pattern.finditer(revision):
+            idx = int(match.group(1))
+            content = match.group(2).strip()
+            if idx >= 1:
+                changes[idx] = content
+
+        # 应用修改
+        result_paragraphs = list(draft_paragraphs)
+        for idx, new_content in changes.items():
+            array_idx = idx - 1  # [段落1] → index 0
+            if 0 <= array_idx < len(result_paragraphs):
+                result_paragraphs[array_idx] = new_content
+            else:
+                # 超出范围则追加
+                result_paragraphs.append(new_content)
+
+        return '\n\n'.join(result_paragraphs)
 
     @staticmethod
     def _build_diff_snapshot(old_content: str, new_content: str) -> str:
@@ -475,6 +605,7 @@ class GenerationService:
         template: Optional[PromptTemplate] = None,
         chapter_id: Optional[uuid.UUID] = None,
         context_budget: Optional[int] = None,
+        model_config: Optional[ModelConfig] = None,
     ) -> list[dict]:
         bundle = await self._build_context_bundle(
             chapter_outline=chapter_outline,
@@ -482,6 +613,7 @@ class GenerationService:
             outline=outline,
             chapter_id=chapter_id,
             context_budget=context_budget,
+            model_config=model_config,
         )
 
         min_words = project.target_words_per_chapter_min or 3000
@@ -539,11 +671,14 @@ class GenerationService:
             system_parts.append(f"\n【活跃伏笔（请注意呼应）】\n{bundle['foreshadowings_text']}")
         if bundle["story_bible_text"]:
             system_parts.append(f"\n【故事圣经】\n{bundle['story_bible_text']}")
+        if bundle.get("series_predecessor_text"):
+            system_parts.append(f"\n【系列前作上下文（本书是系列续作，请保持连贯）】\n{bundle['series_predecessor_text']}")
 
         system_parts.append("""
 ## 输入治理契约
 - 章节摘要和详细大纲是本章的写作指令，必须严格遵循。
 - 世界观设定和角色设定是硬护栏，不可违反。
+- 系列前作上下文是已确立的系列事实，续作必须与前作保持一致，不可矛盾。
 - 前章摘要和前章内容片段用于衔接参考，不要重复已有内容。
 - 如果详细大纲与世界观设定冲突，以世界观设定为准。
 - 伏笔动态用于保持连贯性，不要强行回收未到期的伏笔。
@@ -584,52 +719,37 @@ class GenerationService:
         auto_score: bool = False,
         score_threshold: float = 6.0,
         auto_revise: bool = False,
+        preview: bool = False,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        adapter=None,
     ) -> AsyncGenerator[str, None]:
         """流式生成章节内容，yield SSE 事件，支持自动评分重试"""
         max_retries = 2 if auto_score else 0
 
         for retry_count in range(max_retries + 1):
-            # 获取章节
-            chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-            chapter = chapter_result.scalar_one_or_none()
-            if not chapter:
-                yield json.dumps({"type": "error", "message": "章节不存在"})
+            # 加载实体链
+            try:
+                chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+            except ValueError as e:
+                yield json.dumps({"type": "error", "message": str(e)})
                 return
 
-            # 获取章节大纲
-            outline_result = await self.db.execute(
-                select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
-            )
-            chapter_outline = outline_result.scalar_one_or_none()
-            if not chapter_outline:
-                yield json.dumps({"type": "error", "message": "章节大纲不存在"})
+            chapter = chain["chapter"]
+            chapter_outline = chain["chapter_outline"]
+            outline = chain["outline"]
+            project = chain["project"]
+            model_config = chain["model_config"]
+
+            # 并发锁定：检查是否正在生成中
+            if chapter.status == "generating":
+                yield json.dumps({"type": "error", "message": "该章节正在生成中，请稍后再试"})
                 return
 
-            # 获取大纲和项目
-            outline_result = await self.db.execute(
-                select(Outline).where(Outline.id == chapter_outline.outline_id)
-            )
-            outline = outline_result.scalar_one_or_none()
-            if not outline:
-                yield json.dumps({"type": "error", "message": "大纲不存在"})
-                return
-
-            project_result = await self.db.execute(
-                select(Project).where(Project.id == outline.project_id)
-            )
-            project = project_result.scalar_one_or_none()
-            if not project:
-                yield json.dumps({"type": "error", "message": "项目不存在"})
-                return
-
-            # 获取模型配置
-            model_result = await self.db.execute(
-                select(ModelConfig).where(ModelConfig.id == model_id)
-            )
-            model_config = model_result.scalar_one_or_none()
-            if not model_config:
-                yield json.dumps({"type": "error", "message": "模型不存在"})
-                return
+            # 标记为生成中，记录原始状态用于 preview 模式恢复
+            previous_status = chapter.status
+            chapter.status = "generating"
+            await self.db.flush()
 
             # 检查预算
             budget_service = CostBudgetService(self.db)
@@ -647,20 +767,22 @@ class GenerationService:
                 template = template_result.scalar_one_or_none()
 
             # 构建 prompt（根据模型上下文窗口计算预算）
-            context_budget = max(2000, int(model_config.max_context_tokens * 1.8) - 500) if hasattr(model_config, 'max_context_tokens') else None
+            context_budget = self._calc_context_budget(model_config)
             bundle = await self._build_context_bundle(
                 chapter_outline=chapter_outline,
                 project=project,
                 outline=outline,
                 chapter_id=chapter_id,
                 context_budget=context_budget,
+                model_config=model_config,
             )
             if bundle["conflicts"]:
                 yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
-            messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget)
+            messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget, model_config)
 
-            # 创建适配器
-            adapter = AdapterFactory.create(model_config)
+            # 创建或复用适配器
+            if adapter is None:
+                adapter = AdapterFactory.create(model_config)
 
             # 重试通知
             if retry_count > 0:
@@ -676,7 +798,7 @@ class GenerationService:
             start_time = time.time()
             content_parts = []
             try:
-                async for token in adapter.generate_stream(messages, max_tokens=max_tokens):
+                async for token in adapter.generate_stream(messages, max_tokens=max_tokens, temperature=temperature, top_p=top_p):
                     content_parts.append(token)
                     yield json.dumps({"type": "token", "content": token}, ensure_ascii=False)
 
@@ -693,19 +815,30 @@ class GenerationService:
 
                 duration_ms = int((time.time() - start_time) * 1000)
 
-                # 保存到数据库
-                chapter.content = full_content
-                chapter.word_count = word_count
-                chapter.model_id = model_id
-                token_used = adapter.count_tokens(full_content)
-                chapter.token_used = token_used
-                chapter.status = "completed"
+                # 优先使用 API 返回的真实 token 数据
+                usage = adapter.last_usage
+                if usage and usage.completion_tokens > 0:
+                    token_used = usage.completion_tokens
+                    estimated_input_tokens = usage.prompt_tokens
+                else:
+                    token_used = adapter.count_tokens(full_content)
+                    estimated_input_tokens = adapter.count_tokens(messages[0]["content"] + messages[1]["content"])
 
                 # 计算费用
-                estimated_input_tokens = adapter.count_tokens(messages[0]["content"] + messages[1]["content"])
                 input_rate, output_rate = self._get_effective_rates(model_config)
                 cost = input_rate * estimated_input_tokens / 1000 + output_rate * token_used / 1000
                 chapter.cost = round(cost, 6)
+
+                if preview:
+                    # 预览模式：只写入版本记录，不覆盖正文
+                    chapter.status = previous_status or "empty"
+                else:
+                    # 正式模式：覆盖正文
+                    chapter.content = full_content
+                    chapter.word_count = word_count
+                    chapter.model_id = model_id
+                    chapter.token_used = token_used
+                    chapter.status = "completed"
 
                 # 自动评分
                 quality_score_value = None
@@ -757,7 +890,7 @@ class GenerationService:
                     model_id=model_id,
                     token_used=token_used,
                     quality_score=Decimal(str(quality_score_value)) if quality_score_value is not None else None,
-                    change_type="ai_generate",
+                    change_type="preview" if preview else "ai_generate",
                     diff_snapshot=diff_snapshot,
                 )
                 self.db.add(version)
@@ -781,81 +914,22 @@ class GenerationService:
 
                 await self.db.commit()
 
-                # 字数治理：内容过短时自动续写
+                # 字数不足提示：告知前端而非静默续写
                 min_target = project.target_words_per_chapter_min or 3000
                 if word_count < min_target * 0.7:
                     yield json.dumps({
-                        "type": "status",
-                        "message": f"生成内容 {word_count} 字，低于目标 {min_target} 字，自动续写中...",
+                        "type": "short_content",
+                        "word_count": word_count,
+                        "target": min_target,
                     }, ensure_ascii=False)
-                    # 构建续写 prompt
-                    extend_prompt = [
-                        {"role": "system", "content": f"你是一位专业的{project.genre or ''}小说作家。请续写以下内容，保持风格和情节连贯。直接输出续写内容。"},
-                        {"role": "user", "content": f"以下是一段未完成的章节内容（{word_count}字），请继续写到约{min_target}字：\n\n{full_content[-1000:]}"},
-                    ]
-                    extend_parts = []
-                    async for token in adapter.generate_stream(extend_prompt, max_tokens=max_tokens):
-                        extend_parts.append(token)
-                    extended = "".join(extend_parts)
-                    if extended and len(extended) > 50:
-                        full_content = full_content + extended
-                        word_count = len(full_content)
-                        chapter.content = full_content
-                        chapter.word_count = word_count
-                        extend_token_used = adapter.count_tokens(full_content)
-                        chapter.token_used = extend_token_used
-
-                        # 续写费用
-                        extend_input_tokens = adapter.count_tokens(
-                            extend_prompt[0]["content"] + extend_prompt[1]["content"]
-                        )
-                        input_rate, output_rate = self._get_effective_rates(model_config)
-                        extend_cost = input_rate * extend_input_tokens / 1000 + output_rate * extend_token_used / 1000
-                        chapter.cost = (chapter.cost or Decimal("0")) + Decimal(str(round(extend_cost, 6)))
-                        await budget_service.record_cost(Decimal(str(round(extend_cost, 6))))
-
-                        # 续写版本记录
-                        version_count_result = await self.db.execute(
-                            select(ChapterVersion).where(ChapterVersion.chapter_id == chapter_id)
-                        )
-                        versions = list(version_count_result.scalars().all())
-                        version = ChapterVersion(
-                            chapter_id=chapter_id,
-                            version_number=len(versions) + 1,
-                            content=full_content,
-                            word_count=word_count,
-                            model_id=model_id,
-                            token_used=extend_token_used,
-                            change_type="ai_generate",
-                            diff_snapshot=self._build_diff_snapshot(previous_content, full_content),
-                        )
-                        self.db.add(version)
-
-                        # 续写生成日志
-                        log = GenerationLog(
-                            chapter_id=chapter_id,
-                            model_id=model_id,
-                            status="completed",
-                            token_input=extend_input_tokens,
-                            token_output=extend_token_used,
-                            cost=round(extend_cost, 6),
-                            duration_ms=0,
-                            retry_count=0,
-                        )
-                        self.db.add(log)
-
-                        await self.db.commit()
-                        yield json.dumps({
-                            "type": "status",
-                            "message": f"续写完成，当前 {word_count} 字",
-                        }, ensure_ascii=False)
-
 
                 await self._deposit_story_bible_draft(
                     project_id=project.id,
                     chapter_outline=chapter_outline,
                     chapter_content=full_content,
                     model_config=model_config,
+                    adapter=adapter,
+                    chapter_id=chapter.id,
                 )
 
                 # 后写验证（零 LLM 成本）
@@ -879,6 +953,7 @@ class GenerationService:
 
                             revised_content = await self._revise_for_quality(
                                 model_config, full_content, critical, project.genre or "",
+                                adapter=adapter,
                             )
                             revised_issues = ValidationService.validate(revised_content, target)
                             revised_critical = [i for i in revised_issues if i.get("severity") == "error"]
@@ -889,7 +964,10 @@ class GenerationService:
                                 # 更新数据库
                                 chapter.content = full_content
                                 chapter.word_count = word_count
-                                token_used = adapter.count_tokens(full_content)
+                                if adapter.last_usage:
+                                    token_used = adapter.last_usage.completion_tokens
+                                else:
+                                    token_used = adapter.count_tokens(full_content)
                                 chapter.token_used = token_used
                                 await self.db.commit()
 
@@ -915,7 +993,13 @@ class GenerationService:
                     "duration_ms": duration_ms,
                     "score": quality_score_value,
                     "retry_count": retry_count,
+                    "preview": preview,
+                    "preview_version_id": str(version.id) if preview else None,
                 }, ensure_ascii=False)
+
+                # 生成结构化摘要（确保批量生成时下一章能看到前章摘要）
+                if not preview:
+                    await self._generate_content_summary(chapter, model_config, adapter=adapter)
 
                 return  # 成功完成，退出重试循环
 
@@ -939,52 +1023,33 @@ class GenerationService:
         model_id: uuid.UUID,
         max_tokens: Optional[int] = None,
         auto_revise: bool = False,
+        adapter=None,
     ) -> AsyncGenerator[str, None]:
         """续写章节内容，基于已有内容继续生成"""
-        # 获取章节
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            yield json.dumps({"type": "error", "message": "章节不存在"})
+        # 加载实体链
+        try:
+            chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        except ValueError as e:
+            yield json.dumps({"type": "error", "message": str(e)})
             return
+
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        outline = chain["outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
+
+        # 并发锁定
+        if chapter.status == "generating":
+            yield json.dumps({"type": "error", "message": "该章节正在生成中，请稍后再试"})
+            return
+        chapter.status = "generating"
+        await self.db.flush()
 
         if not chapter.content or len(chapter.content.strip()) < 50:
             yield json.dumps({"type": "error", "message": "章节内容过短，无法续写"})
-            return
-
-        # 获取章节大纲
-        outline_result = await self.db.execute(
-            select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
-        )
-        chapter_outline = outline_result.scalar_one_or_none()
-        if not chapter_outline:
-            yield json.dumps({"type": "error", "message": "章节大纲不存在"})
-            return
-
-        # 获取大纲和项目
-        outline_result = await self.db.execute(
-            select(Outline).where(Outline.id == chapter_outline.outline_id)
-        )
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            yield json.dumps({"type": "error", "message": "大纲不存在"})
-            return
-
-        project_result = await self.db.execute(
-            select(Project).where(Project.id == outline.project_id)
-        )
-        project = project_result.scalar_one_or_none()
-        if not project:
-            yield json.dumps({"type": "error", "message": "项目不存在"})
-            return
-
-        # 获取模型配置
-        model_result = await self.db.execute(
-            select(ModelConfig).where(ModelConfig.id == model_id)
-        )
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            yield json.dumps({"type": "error", "message": "模型不存在"})
+            chapter.status = "completed"
+            await self.db.flush()
             return
 
         # 检查预算
@@ -1003,13 +1068,14 @@ class GenerationService:
         max_words = project.target_words_per_chapter_max or 5000
 
         # 构建统一上下文（续写时减预算）
-        context_budget = max(2000, int(model_config.max_context_tokens * 1.8) - len(context_tail) - 500) if hasattr(model_config, 'max_context_tokens') else None
+        context_budget = self._calc_context_budget(model_config, extra_chars=len(context_tail))
         bundle = await self._build_context_bundle(
             chapter_outline=chapter_outline,
             project=project,
             outline=outline,
             chapter_id=chapter_id,
             context_budget=context_budget,
+            model_config=model_config,
         )
         if bundle["conflicts"]:
             yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
@@ -1065,8 +1131,9 @@ class GenerationService:
             {"role": "user", "content": "\n".join(user_parts)},
         ]
 
-        # 创建适配器
-        adapter = AdapterFactory.create(model_config)
+        # 创建或复用适配器
+        if adapter is None:
+            adapter = AdapterFactory.create(model_config)
 
         # 流式生成
         start_time = time.time()
@@ -1094,12 +1161,19 @@ class GenerationService:
             chapter.content = full_content
             chapter.word_count = word_count
             chapter.model_id = model_id
-            new_token_used = adapter.count_tokens(new_content)
+
+            # 优先使用 API 返回的真实 token 数据
+            usage = adapter.last_usage
+            if usage and usage.completion_tokens > 0:
+                new_token_used = usage.completion_tokens
+                estimated_input_tokens = usage.prompt_tokens
+            else:
+                new_token_used = adapter.count_tokens(new_content)
+                estimated_input_tokens = adapter.count_tokens(messages[0]["content"] + messages[1]["content"])
             chapter.token_used = (chapter.token_used or 0) + new_token_used
             chapter.status = "completed"
 
             # 计算费用
-            estimated_input_tokens = adapter.count_tokens(messages[0]["content"] + messages[1]["content"])
             input_rate, output_rate = self._get_effective_rates(model_config)
             cost = input_rate * estimated_input_tokens / 1000 + output_rate * new_token_used / 1000
             additional_cost = Decimal(str(round(cost, 6)))
@@ -1146,10 +1220,12 @@ class GenerationService:
                 chapter_outline=chapter_outline,
                 chapter_content=full_content,
                 model_config=model_config,
+                adapter=adapter,
+                chapter_id=chapter.id,
             )
 
-            # 异步生成内容摘要
-            await self._generate_content_summary(chapter, model_config)
+            # 生成结构化摘要
+            await self._generate_content_summary(chapter, model_config, adapter=adapter)
 
             # 后写验证（零 LLM 成本）
             target = project.target_words_per_chapter_min or 0
@@ -1172,6 +1248,7 @@ class GenerationService:
 
                         revised_content = await self._revise_for_quality(
                             model_config, full_content, critical, project.genre or "",
+                            adapter=adapter,
                         )
                         revised_issues = ValidationService.validate(revised_content, target)
                         revised_critical = [i for i in revised_issues if i.get("severity") == "error"]
@@ -1181,7 +1258,10 @@ class GenerationService:
                             word_count = len(full_content)
                             chapter.content = full_content
                             chapter.word_count = word_count
-                            new_token_used = adapter.count_tokens(full_content)
+                            if adapter.last_usage:
+                                new_token_used = adapter.last_usage.completion_tokens
+                            else:
+                                new_token_used = adapter.count_tokens(full_content)
                             chapter.token_used = new_token_used
                             await self.db.commit()
 
@@ -1234,35 +1314,143 @@ class GenerationService:
             await self.db.refresh(chapter)
         return chapter
 
-    async def _generate_content_summary(self, chapter: Chapter, model_config: ModelConfig) -> None:
-        """异步生成章节状态沉淀摘要，存入 chapter.content_summary（500字以内）"""
+    async def _generate_content_summary(self, chapter: Chapter, model_config: ModelConfig, adapter=None) -> None:
+        """生成结构化章节摘要，存入 ChapterSummary + 兼容的 content_summary"""
         if not chapter.content or len(chapter.content.strip()) < 100:
             return
         try:
-            adapter = AdapterFactory.create(model_config)
-            prompt = (
-                "请用结构化方式总结以下章节，格式如下（总字数不超过400字）：\n"
-                "【核心事件】本章发生的关键事件（1-2句）\n"
-                "【角色状态】涉及角色的情感/立场/处境变化\n"
-                "【未解悬念】本章留下的悬念或待解决的问题\n"
-                "【叙事线索】本章推进的主线/支线进展\n"
-                "只输出以上四部分，不要加任何前缀或解释。\n\n"
-                f"章节内容：\n{chapter.content[:4000]}"
+            if adapter is None:
+                adapter = AdapterFactory.create(model_config)
+            # 用摘要替代正文，节省 token
+            content_input = chapter.content[:4000]
+
+            structured_prompt = (
+                "请分析以下小说章节内容，输出 JSON 对象（不要输出其他内容）：\n"
+                "{\n"
+                '  "events": [{"event": "事件描述", "characters": ["角色名"], "location": "地点"}],\n'
+                '  "character_states": {"角色名": {"status": "当前状态", "emotion": "情感", "location": "位置"}},\n'
+                '  "unresolved_hooks": ["未解悬念1", "未解悬念2"],\n'
+                '  "resolved_hooks": ["已回收的伏笔1"],\n'
+                '  "timeline": "时间描述，如 Day 3 下午",\n'
+                '  "locations": ["出现的地点1", "出现的地点2"],\n'
+                '  "narrative_threads": ["推进的主线/支线"],\n'
+                '  "plain_summary": "200字以内的自然语言摘要"\n'
+                "}\n\n"
+                f"章节内容：\n{content_input}"
             )
             messages = [
-                {"role": "system", "content": "你是一个小说编辑，擅长提炼章节要点和追踪叙事状态。"},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": "你是一个小说编辑，擅长提炼章节要点和追踪叙事状态。只输出 JSON。"},
+                {"role": "user", "content": structured_prompt},
             ]
             summary_parts = []
-            async for token in adapter.generate_stream(messages, max_tokens=500):
+            async for token in adapter.generate_stream(messages, max_tokens=800):
                 summary_parts.append(token)
-            summary = "".join(summary_parts).strip()
-            if summary:
-                chapter.content_summary = summary[:500]
-                await self.db.commit()
-        except Exception:
-            # 摘要生成失败不影响主流程
-            pass
+            raw = "".join(summary_parts).strip()
+
+            data = extract_json(raw)
+
+            # 获取或创建 ChapterSummary
+            summary_result = await self.db.execute(
+                select(ChapterSummary).where(ChapterSummary.chapter_id == chapter.id)
+            )
+            cs = summary_result.scalar_one_or_none()
+            if not cs:
+                cs = ChapterSummary(chapter_id=chapter.id)
+                self.db.add(cs)
+
+            cs.events = json.dumps(data.get("events", []), ensure_ascii=False)
+            cs.character_states = json.dumps(data.get("character_states", {}), ensure_ascii=False)
+            cs.unresolved_hooks = json.dumps(data.get("unresolved_hooks", []), ensure_ascii=False)
+            cs.resolved_hooks = json.dumps(data.get("resolved_hooks", []), ensure_ascii=False)
+            cs.timeline = data.get("timeline", "")
+            cs.locations = json.dumps(data.get("locations", []), ensure_ascii=False)
+            cs.narrative_threads = json.dumps(data.get("narrative_threads", []), ensure_ascii=False)
+            cs.word_count_at_summary = len(chapter.content)
+            cs.is_stale = False
+
+            # 兼容：同时更新自由文本摘要
+            plain = data.get("plain_summary", "")
+            if plain:
+                chapter.content_summary = plain[:500]
+
+            await self.db.commit()
+
+            # 自动追踪角色出场：解析 character_states，匹配角色名并创建/更新出场记录
+            await self._sync_character_appearances(chapter, data.get("character_states", {}))
+
+        except Exception as e:
+            logger.warning(f"摘要生成失败 (chapter_id={chapter.id}): {e}")
+
+    async def _sync_character_appearances(self, chapter: Chapter, character_states: dict) -> None:
+        """从 ChapterSummary.character_states 自动同步角色出场记录"""
+        if not character_states or not isinstance(character_states, dict):
+            return
+        from app.models.character_appearance import CharacterAppearance
+
+        # 获取 chapter -> chapter_outline
+        co_result = await self.db.execute(
+            select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
+        )
+        chapter_outline = co_result.scalar_one_or_none()
+        if not chapter_outline:
+            return
+
+        # 获取项目下所有角色（通过 worldview 关联）
+        from app.models.worldview import worldview_characters
+        outline_result = await self.db.execute(
+            select(Outline).where(Outline.id == chapter_outline.outline_id)
+        )
+        outline = outline_result.scalar_one_or_none()
+        if not outline:
+            return
+        project_result = await self.db.execute(
+            select(Project).where(Project.id == outline.project_id)
+        )
+        project = project_result.scalar_one_or_none()
+        if not project:
+            return
+
+        char_result = await self.db.execute(select(Character))
+        all_characters = list(char_result.scalars().all())
+        # 按名匹配
+        name_to_char = {c.name: c for c in all_characters}
+
+        # 删除该章节旧的自动生成出场记录
+        await self.db.execute(
+            CharacterAppearance.__table__.delete()
+            .where(CharacterAppearance.chapter_outline_id == chapter_outline.id)
+        )
+
+        for name, state in character_states.items():
+            char = name_to_char.get(name)
+            if not char:
+                continue
+            # 推断角色在该章的重要程度
+            role = "minor"
+            if isinstance(state, dict):
+                status = state.get("status", "")
+                if status and "主" in status:
+                    role = "major"
+                elif status and "提及" in status:
+                    role = "mentioned"
+            notes = ""
+            if isinstance(state, dict):
+                parts = []
+                if state.get("emotion"):
+                    parts.append(f"情感: {state['emotion']}")
+                if state.get("location"):
+                    parts.append(f"位置: {state['location']}")
+                notes = "; ".join(parts)
+
+            appearance = CharacterAppearance(
+                character_id=char.id,
+                chapter_outline_id=chapter_outline.id,
+                role_in_chapter=role,
+                notes=notes,
+            )
+            self.db.add(appearance)
+
+        await self.db.flush()
 
     async def _revise_for_quality(
         self,
@@ -1270,6 +1458,7 @@ class GenerationService:
         content: str,
         issues: list,
         genre: str = "",
+        adapter=None,
     ) -> str:
         """调用 LLM 修复 error 级别的验证问题，返回修订后的内容"""
         issue_descriptions = []
@@ -1303,7 +1492,8 @@ class GenerationService:
             },
         ]
 
-        adapter = AdapterFactory.create(model_config)
+        if adapter is None:
+            adapter = AdapterFactory.create(model_config)
         revised_parts = []
         async for token in adapter.generate_stream(messages, max_tokens=len(content) + 1000):
             revised_parts.append(token)
@@ -1311,30 +1501,12 @@ class GenerationService:
 
     async def get_context_usage(self, chapter_id: uuid.UUID, model_id: uuid.UUID) -> dict:
         """返回上下文使用量明细（用于前端可视化）"""
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            raise ValueError("章节不存在")
-
-        co_result = await self.db.execute(select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id))
-        chapter_outline = co_result.scalar_one_or_none()
-        if not chapter_outline:
-            raise ValueError("章节大纲不存在")
-
-        outline_result = await self.db.execute(select(Outline).where(Outline.id == chapter_outline.outline_id))
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            raise ValueError("大纲不存在")
-
-        project_result = await self.db.execute(select(Project).where(Project.id == outline.project_id))
-        project = project_result.scalar_one_or_none()
-        if not project:
-            raise ValueError("项目不存在")
-
-        model_result = await self.db.execute(select(ModelConfig).where(ModelConfig.id == model_id))
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            raise ValueError("模型不存在")
+        chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        outline = chain["outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
 
         # 使用当前上下文构建逻辑估算各模块 token
         terminologies_result = await self.db.execute(select(Terminology).where(Terminology.project_id == project.id))
@@ -1410,35 +1582,17 @@ class GenerationService:
         max_suggestions: int = 10,
     ) -> AsyncGenerator[str, None]:
         """对粗稿给出逐段精修建议（SSE）"""
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            yield json.dumps({"type": "error", "message": "章节不存在"}, ensure_ascii=False)
+        try:
+            chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        except ValueError as e:
+            yield json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
             return
 
-        co_result = await self.db.execute(select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id))
-        chapter_outline = co_result.scalar_one_or_none()
-        if not chapter_outline:
-            yield json.dumps({"type": "error", "message": "章节大纲不存在"}, ensure_ascii=False)
-            return
-
-        outline_result = await self.db.execute(select(Outline).where(Outline.id == chapter_outline.outline_id))
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            yield json.dumps({"type": "error", "message": "大纲不存在"}, ensure_ascii=False)
-            return
-
-        project_result = await self.db.execute(select(Project).where(Project.id == outline.project_id))
-        project = project_result.scalar_one_or_none()
-        if not project:
-            yield json.dumps({"type": "error", "message": "项目不存在"}, ensure_ascii=False)
-            return
-
-        model_result = await self.db.execute(select(ModelConfig).where(ModelConfig.id == model_id))
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            yield json.dumps({"type": "error", "message": "模型不存在"}, ensure_ascii=False)
-            return
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        outline = chain["outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
 
         paragraphs = [p.strip() for p in draft_text.split("\n") if p.strip()]
         if len(paragraphs) == 0:
@@ -1483,7 +1637,7 @@ class GenerationService:
                 async for token in adapter.generate_stream(messages, max_tokens=800):
                     parts.append(token)
                 raw = "".join(parts).strip()
-                parsed = json.loads(raw)
+                parsed = extract_json(raw)
                 revised_text = (parsed.get("revised") or "").strip()
                 reason = (parsed.get("reason") or "建议优化表达和节奏").strip()
                 confidence = float(parsed.get("confidence") or 0.65)
@@ -1513,46 +1667,28 @@ class GenerationService:
         model_id: uuid.UUID,
         max_tokens: Optional[int] = None,
         template_id: Optional[uuid.UUID] = None,
+        adapter=None,
     ) -> AsyncGenerator[str, None]:
         """多轮生成：初稿 → 审校 → 定稿"""
-        # 获取章节和上下文
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            yield json.dumps({"type": "error", "message": "章节不存在"})
+        # 加载实体链
+        try:
+            chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        except ValueError as e:
+            yield json.dumps({"type": "error", "message": str(e)})
             return
 
-        outline_result = await self.db.execute(
-            select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
-        )
-        chapter_outline = outline_result.scalar_one_or_none()
-        if not chapter_outline:
-            yield json.dumps({"type": "error", "message": "章节大纲不存在"})
-            return
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        outline = chain["outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
 
-        outline_result = await self.db.execute(
-            select(Outline).where(Outline.id == chapter_outline.outline_id)
-        )
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            yield json.dumps({"type": "error", "message": "大纲不存在"})
+        # 并发锁定
+        if chapter.status == "generating":
+            yield json.dumps({"type": "error", "message": "该章节正在生成中，请稍后再试"})
             return
-
-        project_result = await self.db.execute(
-            select(Project).where(Project.id == outline.project_id)
-        )
-        project = project_result.scalar_one_or_none()
-        if not project:
-            yield json.dumps({"type": "error", "message": "项目不存在"})
-            return
-
-        model_result = await self.db.execute(
-            select(ModelConfig).where(ModelConfig.id == model_id)
-        )
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            yield json.dumps({"type": "error", "message": "模型不存在"})
-            return
+        chapter.status = "generating"
+        await self.db.flush()
 
         # 检查预算
         budget_service = CostBudgetService(self.db)
@@ -1570,18 +1706,20 @@ class GenerationService:
             template = template_result.scalar_one_or_none()
 
         # 构建基础 prompt
-        context_budget = max(2000, int(model_config.max_context_tokens * 1.8) - 500) if hasattr(model_config, 'max_context_tokens') else None
+        context_budget = self._calc_context_budget(model_config)
         bundle = await self._build_context_bundle(
             chapter_outline=chapter_outline,
             project=project,
             outline=outline,
             chapter_id=chapter_id,
             context_budget=context_budget,
+            model_config=model_config,
         )
         if bundle["conflicts"]:
             yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
-        base_messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget)
-        adapter = AdapterFactory.create(model_config)
+        base_messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget, model_config)
+        if adapter is None:
+            adapter = AdapterFactory.create(model_config)
 
         rounds = [
             {"name": "draft", "label": "初稿"},
@@ -1609,18 +1747,17 @@ class GenerationService:
                 # 初稿：使用原始 prompt
                 messages = base_messages
             elif round_idx == 1:
-                # 审校：让 AI 审查初稿
+                # 审校：只输出审校意见，不重复原文（省 token）
                 messages = [
                     {
                         "role": "system",
                         "content": (
-                            "你是一位资深的文学编辑。请仔细审阅以下小说章节，从以下维度给出详细的审校意见：\n"
-                            "1. 情节连贯性：情节是否通顺，有无逻辑漏洞\n"
-                            "2. 文笔质量：语言表达是否流畅，修辞是否恰当\n"
-                            "3. 角色塑造：人物言行是否符合设定\n"
-                            "4. 节奏把控：叙事节奏是否合理\n"
-                            "5. 细节问题：错别字、用词不当、标点问题\n\n"
-                            "请直接给出具体的修改建议，不要重复原文内容。"
+                            "你是一位资深的文学编辑。请审阅以下小说章节，给出具体的修改意见。\n"
+                            "要求：\n"
+                            "- 逐条列出需要修改的地方，标明段落编号或引用原文片段\n"
+                            "- 只输出修改建议，不要重复不需要修改的原文\n"
+                            "- 每条建议格式：[位置] 问题 → 修改方向\n"
+                            "- 涵盖：情节逻辑、文笔质量、角色一致性、节奏、细节"
                         ),
                     },
                     {
@@ -1633,17 +1770,21 @@ class GenerationService:
                     },
                 ]
             else:
-                # 定稿：基于初稿和审校意见进行修改
+                # 定稿：增量模式 — 只输出需要修改的段落，省 token
+                review_summary = review_content[:1500] if len(review_content) > 1500 else review_content
                 messages = [
                     {
                         "role": "system",
                         "content": (
-                            "你是一位专业的{genre}小说作家。请根据编辑的审校意见，对初稿进行修改和完善。\n"
+                            "你是一位专业的{genre}小说作家。请根据审校意见修改章节中需要改进的部分。\n"
                             "要求：\n"
-                            "- 采纳合理的修改建议\n"
-                            "- 保持原文的风格和基调\n"
-                            "- 修正发现的问题\n"
-                            "- 直接输出修改后的完整章节内容，不要包含任何注释或说明"
+                            "- 只输出需要修改的段落，未修改的段落不要输出\n"
+                            "- 每个修改段落前加标记 [段落N]（N 为从 1 开始的段落编号）\n"
+                            "- 段落按双换行符分隔，编号即第几个双换行分隔的段落\n"
+                            "- 采纳审校意见中的合理建议\n"
+                            "- 保持原文的整体风格和基调\n"
+                            "- 如果需要大幅重写（超过一半段落），则直接输出完整章节，不加段落标记\n"
+                            "- 不要包含注释或说明文字"
                         ).format(genre=project.genre or ""),
                     },
                     {
@@ -1651,9 +1792,9 @@ class GenerationService:
                         "content": (
                             f"章节标题：{chapter_outline.title or f'第{chapter_outline.chapter_number}章'}\n"
                             f"章节概述：{chapter_outline.summary}\n\n"
-                            f"初稿：\n{draft_content}\n\n"
-                            f"审校意见：\n{review_content}\n\n"
-                            "请输出修改后的完整章节内容。"
+                            f"原稿：\n{draft_content}\n\n"
+                            f"审校意见：\n{review_summary}\n\n"
+                            "请输出修改后的段落（带 [段落N] 标记）或完整重写章节。"
                         ),
                     },
                 ]
@@ -1680,11 +1821,16 @@ class GenerationService:
                     }, ensure_ascii=False)
                     return
 
-                round_tokens = adapter.count_tokens(round_content)
+                # 优先使用 API 返回的真实 token 数据
+                usage = adapter.last_usage
+                if usage and usage.completion_tokens > 0:
+                    round_tokens = usage.completion_tokens
+                    input_tokens = usage.prompt_tokens
+                else:
+                    round_tokens = adapter.count_tokens(round_content)
+                    input_tokens = adapter.count_tokens(messages[0]["content"] + messages[1]["content"])
 
                 # 计算费用
-                input_text = messages[0]["content"] + messages[1]["content"]
-                input_tokens = adapter.count_tokens(input_text)
                 input_rate, output_rate = self._get_effective_rates(model_config)
                 round_cost = (
                     input_rate * input_tokens / 1000
@@ -1700,8 +1846,8 @@ class GenerationService:
                 elif round_idx == 1:
                     review_content = round_content
                 else:
-                    # 定稿：保存到数据库
-                    final_content = round_content
+                    # 定稿：尝试增量合并，降级为完整替换
+                    final_content = self._merge_revisions(draft_content, round_content)
                     word_count = len(final_content)
                     previous_content = chapter.content or ""
 
@@ -1750,6 +1896,8 @@ class GenerationService:
                         chapter_outline=chapter_outline,
                         chapter_content=final_content,
                         model_config=model_config,
+                        adapter=adapter,
+                        chapter_id=chapter.id,
                     )
 
                 yield json.dumps({
@@ -1769,8 +1917,8 @@ class GenerationService:
         # 全部完成
         duration_ms = int((time.time() - start_time) * 1000)
 
-        # 异步生成内容摘要
-        await self._generate_content_summary(chapter, model_config)
+        # 生成结构化摘要
+        await self._generate_content_summary(chapter, model_config, adapter=adapter)
 
         yield json.dumps({
             "type": "done",
@@ -1788,42 +1936,12 @@ class GenerationService:
         template_id: Optional[uuid.UUID] = None,
     ) -> dict:
         """预估生成费用"""
-        # 获取章节
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            raise ValueError("章节不存在")
-
-        # 获取章节大纲
-        outline_result = await self.db.execute(
-            select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
-        )
-        chapter_outline = outline_result.scalar_one_or_none()
-        if not chapter_outline:
-            raise ValueError("章节大纲不存在")
-
-        # 获取大纲和项目
-        outline_result = await self.db.execute(
-            select(Outline).where(Outline.id == chapter_outline.outline_id)
-        )
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            raise ValueError("大纲不存在")
-
-        project_result = await self.db.execute(
-            select(Project).where(Project.id == outline.project_id)
-        )
-        project = project_result.scalar_one_or_none()
-        if not project:
-            raise ValueError("项目不存在")
-
-        # 获取模型配置
-        model_result = await self.db.execute(
-            select(ModelConfig).where(ModelConfig.id == model_id)
-        )
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            raise ValueError("模型不存在")
+        chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        outline = chain["outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
 
         # 获取模板
         template = None
@@ -1834,8 +1952,8 @@ class GenerationService:
             template = template_result.scalar_one_or_none()
 
         # 构建 prompt 计算 input tokens
-        context_budget = max(2000, int(model_config.max_context_tokens * 1.8) - 500) if hasattr(model_config, 'max_context_tokens') else None
-        messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, context_budget=context_budget)
+        context_budget = self._calc_context_budget(model_config)
+        messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, context_budget=context_budget, model_config=model_config)
         prompt_text = messages[0]["content"] + messages[1]["content"]
 
         adapter = AdapterFactory.create(model_config)
@@ -1868,44 +1986,31 @@ class GenerationService:
         context_after: str = "",
     ) -> AsyncGenerator[str, None]:
         """改写选中的文本片段，SSE 流式输出"""
-        # 加载章节链
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            yield json.dumps({"type": "error", "message": "章节不存在"})
+        # 加载实体链
+        try:
+            chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        except ValueError as e:
+            yield json.dumps({"type": "error", "message": str(e)})
             return
 
-        co_result = await self.db.execute(
-            select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
-        )
-        chapter_outline = co_result.scalar_one_or_none()
-        if not chapter_outline:
-            yield json.dumps({"type": "error", "message": "章节大纲不存在"})
-            return
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        outline = chain["outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
 
-        ol_result = await self.db.execute(
-            select(Outline).where(Outline.id == chapter_outline.outline_id)
+        # 注入术语表和角色，避免改写违反设定一致性
+        terms_text = ""
+        terms_result = await self.db.execute(
+            select(Terminology).where(Terminology.project_id == project.id).limit(15)
         )
-        outline = ol_result.scalar_one_or_none()
-        if not outline:
-            yield json.dumps({"type": "error", "message": "大纲不存在"})
-            return
+        terminologies = list(terms_result.scalars().all())
+        if terminologies:
+            terms_text = "\n".join([f"- {t.term}: {t.description or ''}" for t in terminologies])
 
-        project_result = await self.db.execute(
-            select(Project).where(Project.id == outline.project_id)
-        )
-        project = project_result.scalar_one_or_none()
-        if not project:
-            yield json.dumps({"type": "error", "message": "项目不存在"})
-            return
-
-        model_result = await self.db.execute(
-            select(ModelConfig).where(ModelConfig.id == model_id)
-        )
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            yield json.dumps({"type": "error", "message": "模型不存在"})
-            return
+        # 注入当前章节涉及的角色
+        outline_text = f"{chapter_outline.title or ''} {chapter_outline.summary or ''}"
+        characters_text = await self._get_characters_context(project, outline_text)
 
         # 构建改写 prompt
         system_parts = [
@@ -1913,6 +2018,10 @@ class GenerationService:
             "请根据指令改写选中的文本片段。",
             "保持与上下文的连贯性，直接输出改写后的内容，不要添加任何解释或标记。",
         ]
+        if terms_text:
+            system_parts.append(f"\n专有名词（改写时必须保持一致）：\n{terms_text}")
+        if characters_text:
+            system_parts.append(f"\n涉及角色：\n{characters_text}")
 
         user_parts = []
         if context_before:
@@ -1940,10 +2049,12 @@ class GenerationService:
         except Exception as e:
             yield json.dumps({"type": "error", "message": f"改写失败: {str(e)}"})
             return
+
+        real_tokens = adapter.last_usage.completion_tokens if adapter.last_usage else token_count * 2
         yield json.dumps({
             "type": "done",
             "content": full_content,
-            "token_used": token_count * 2,
+            "token_used": real_tokens,
         }, ensure_ascii=False)
 
     async def brainstorm_chapter_stream(
@@ -1952,46 +2063,21 @@ class GenerationService:
         model_id: uuid.UUID,
         selected_direction: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            raise ValueError("章节不存在")
+        chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        outline = chain["outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
 
-        co_result = await self.db.execute(
-            select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
-        )
-        chapter_outline = co_result.scalar_one_or_none()
-        if not chapter_outline:
-            raise ValueError("章节大纲不存在")
-
-        outline_result = await self.db.execute(
-            select(Outline).where(Outline.id == chapter_outline.outline_id)
-        )
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            raise ValueError("大纲不存在")
-
-        project_result = await self.db.execute(
-            select(Project).where(Project.id == outline.project_id)
-        )
-        project = project_result.scalar_one_or_none()
-        if not project:
-            raise ValueError("项目不存在")
-
-        model_result = await self.db.execute(
-            select(ModelConfig).where(ModelConfig.id == model_id)
-        )
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            raise ValueError("模型不存在")
-
-        context_budget = max(2000, int(model_config.max_context_tokens * 1.2) - 500) if hasattr(model_config, 'max_context_tokens') else None
+        context_budget = self._calc_context_budget(model_config)
         bundle = await self._build_context_bundle(
             chapter_outline=chapter_outline,
             project=project,
             outline=outline,
             chapter_id=chapter_id,
             context_budget=context_budget,
+            model_config=model_config,
         )
 
         adapter = AdapterFactory.create(model_config)
@@ -2027,7 +2113,7 @@ class GenerationService:
 
         directions: list[dict] = []
         try:
-            parsed = json.loads(brainstorm_raw)
+            parsed = extract_json(brainstorm_raw)
             items = parsed.get("directions") if isinstance(parsed, dict) else None
             if isinstance(items, list):
                 for item in items[:3]:

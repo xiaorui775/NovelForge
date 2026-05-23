@@ -24,6 +24,14 @@ class ChatMessage(Base):
         UUID(as_uuid=True), ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True
     )
     token_used: Mapped[int] = mapped_column(default=0)
+    # 引用上下文
+    referenced_chapter_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    referenced_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    context_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # full, chapter, selection
+    # AI 建议操作（JSON: {"action": "replace", "chapter_id": "...", "content": "..."}）
+    suggested_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

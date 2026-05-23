@@ -14,6 +14,7 @@ class ProjectCreate(BaseModel):
     target_words_per_chapter_min: int = Field(default=3000, ge=100)
     target_words_per_chapter_max: int = Field(default=5000, ge=100)
     worldview_id: Optional[uuid.UUID] = None
+    series_id: Optional[uuid.UUID] = None
     style_reference: Optional[str] = None
     dialogue_ratio: Decimal = Field(default=0.40, ge=0, le=1)
     tags: list[str] = Field(default_factory=list, max_length=20)
@@ -27,6 +28,7 @@ class ProjectUpdate(BaseModel):
     target_words_per_chapter_min: Optional[int] = Field(default=None, ge=100)
     target_words_per_chapter_max: Optional[int] = Field(default=None, ge=100)
     worldview_id: Optional[uuid.UUID] = None
+    series_id: Optional[uuid.UUID] = None
     style_reference: Optional[str] = None
     dialogue_ratio: Optional[Decimal] = Field(default=None, ge=0, le=1)
     status: Optional[str] = None
@@ -42,6 +44,8 @@ class ProjectResponse(BaseModel):
     target_words_per_chapter_min: int
     target_words_per_chapter_max: int
     worldview_id: Optional[uuid.UUID]
+    series_id: Optional[uuid.UUID] = None
+    sort_order_in_series: int = 1
     cover_image: Optional[str]
     status: str
     style_reference: Optional[str]

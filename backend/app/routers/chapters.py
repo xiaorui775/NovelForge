@@ -1,6 +1,7 @@
 import json
 import uuid
 import difflib
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -10,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models.chapter import Chapter, ChapterVersion
+from app.models.chapter_summary import ChapterSummary
 from app.models.outline import ChapterOutline, Outline
 from app.models.foreshadowing import Foreshadowing
 from app.models.scene import Scene
@@ -19,6 +21,7 @@ from app.schemas.chapter import (
     ChapterUpdate,
     ChapterVersionResponse,
     ConsistencyCheckResponse,
+    CrossChapterConsistencyResponse,
     CostEstimateRequest,
     CostEstimateResponse,
     QualityScoreRequest,
@@ -28,9 +31,12 @@ from app.schemas.chapter import (
     ChapterBrainstormRequest,
     ChapterBrainstormResponse,
 )
+from app.adapters.adapter_factory import AdapterFactory
+from app.models.model_config import ModelConfig
 from app.schemas.generation import BatchGenerateRequest
 from app.services.consistency_service import ConsistencyService
 from app.services.generation_service import GenerationService
+from app.services.post_write_service import PostWriteAnalysisService
 from app.services.pacing_service import PacingService
 from app.services.quality_service import QualityService
 
@@ -138,6 +144,16 @@ async def update_chapter(
             )
         )
 
+    # 标记摘要为过期（内容变更超过 20% 时）
+    if old_content != new_content:
+        cs_result = await db.execute(
+            select(ChapterSummary).where(ChapterSummary.chapter_id == chapter_id)
+        )
+        cs = cs_result.scalar_one_or_none()
+        if cs and cs.word_count_at_summary > 0:
+            if abs(len(new_content) - cs.word_count_at_summary) / cs.word_count_at_summary > 0.2:
+                cs.is_stale = True
+
     await db.flush()
     await db.refresh(chapter)
     return chapter
@@ -167,6 +183,9 @@ async def generate_chapter(
                     auto_score=data.auto_score,
                     score_threshold=data.score_threshold,
                     auto_revise=data.auto_revise,
+                    preview=data.preview,
+                    temperature=data.temperature,
+                    top_p=data.top_p,
                 )
             async for event in gen:
                 yield f"data: {event}\n\n"
@@ -199,6 +218,10 @@ async def regenerate_chapter(
                 template_id=data.template_id,
                 auto_score=data.auto_score,
                 score_threshold=data.score_threshold,
+                auto_revise=data.auto_revise,
+                preview=data.preview,
+                temperature=data.temperature,
+                top_p=data.top_p,
             ):
                 yield f"data: {event}\n\n"
         except Exception as e:
@@ -338,6 +361,68 @@ async def brainstorm_chapter(
         },
     )
 
+@router.post("/chapters/{chapter_id}/versions/{version_id}/adopt", response_model=ChapterResponse)
+async def adopt_preview_version(
+    chapter_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """采纳预览版本，将其内容应用到章节正文"""
+    chapter_result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
+    chapter = chapter_result.scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+
+    version_result = await db.execute(
+        select(ChapterVersion).where(
+            ChapterVersion.id == version_id,
+            ChapterVersion.chapter_id == chapter_id,
+        )
+    )
+    version = version_result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(status_code=404, detail="版本不存在")
+
+    old_content = chapter.content or ""
+    chapter.content = version.content
+    chapter.word_count = version.word_count
+    chapter.model_id = version.model_id
+    chapter.token_used = version.token_used
+    chapter.status = "completed"
+
+    # Mark the preview version as adopted so getLatestPreview won't return it again
+    if version.change_type == "preview":
+        version.change_type = "adopt_preview"
+        # Update diff snapshot to reflect the adoption
+        version.diff_snapshot = _build_diff_snapshot(old_content, version.content or "")
+
+    await db.flush()
+    await db.refresh(chapter)
+    return chapter
+
+
+@router.post("/chapters/{chapter_id}/versions/{version_id}/discard", status_code=204)
+async def discard_preview_version(
+    chapter_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """丢弃预览版本，标记为已丢弃"""
+    version_result = await db.execute(
+        select(ChapterVersion).where(
+            ChapterVersion.id == version_id,
+            ChapterVersion.chapter_id == chapter_id,
+        )
+    )
+    version = version_result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(status_code=404, detail="版本不存在")
+
+    if version.change_type == "preview":
+        version.change_type = "discard_preview"
+        await db.flush()
+
+
 @router.get("/chapters/{chapter_id}/versions", response_model=list[ChapterVersionResponse])
 async def list_versions(
     chapter_id: uuid.UUID,
@@ -349,6 +434,23 @@ async def list_versions(
         .order_by(ChapterVersion.version_number.desc())
     )
     return list(result.scalars().all())
+
+
+@router.get("/chapters/{chapter_id}/latest-preview", response_model=ChapterVersionResponse)
+async def get_latest_preview(
+    chapter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter_id, ChapterVersion.change_type == "preview")
+        .order_by(ChapterVersion.created_at.desc())
+        .limit(1)
+    )
+    version = result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(status_code=404, detail="无待处理预览版本")
+    return version
 
 
 @router.post("/chapters/{chapter_id}/versions/{version_id}/restore", response_model=ChapterResponse)
@@ -501,6 +603,23 @@ async def check_consistency(
         raise HTTPException(status_code=500, detail=f"一致性检查失败: {type(e).__name__}: {str(e)}")
 
 
+@router.post("/chapters/{chapter_id}/post-write-analysis")
+async def post_write_analysis(
+    chapter_id: uuid.UUID,
+    data: QualityScoreRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """综合 post-write 分析：质量评分 + 一致性 + 节奏 + 伏笔 + 摘要 + 故事圣经"""
+    service = PostWriteAnalysisService(db)
+    try:
+        result = await service.analyze(chapter_id, data.model_id)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"综合分析失败: {type(e).__name__}: {str(e)}")
+
+
 @router.get("/chapters/{chapter_id}/context")
 async def get_chapter_context(
     chapter_id: uuid.UUID,
@@ -586,6 +705,33 @@ async def get_chapter_context(
     }
 
 
+@router.get("/chapters/{chapter_id}/summary")
+async def get_chapter_summary(
+    chapter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """获取章节结构化摘要"""
+    result = await db.execute(
+        select(ChapterSummary).where(ChapterSummary.chapter_id == chapter_id)
+    )
+    cs = result.scalar_one_or_none()
+    if not cs:
+        return {"exists": False}
+    return {
+        "exists": True,
+        "events": json.loads(cs.events) if cs.events else [],
+        "character_states": json.loads(cs.character_states) if cs.character_states else {},
+        "unresolved_hooks": json.loads(cs.unresolved_hooks) if cs.unresolved_hooks else [],
+        "resolved_hooks": json.loads(cs.resolved_hooks) if cs.resolved_hooks else [],
+        "timeline": cs.timeline,
+        "locations": json.loads(cs.locations) if cs.locations else [],
+        "narrative_threads": json.loads(cs.narrative_threads) if cs.narrative_threads else [],
+        "word_count_at_summary": cs.word_count_at_summary,
+        "is_stale": cs.is_stale,
+        "generated_at": cs.generated_at.isoformat() if cs.generated_at else None,
+    }
+
+
 @router.get("/chapters/{chapter_id}/context-usage")
 async def get_context_usage(
     chapter_id: uuid.UUID,
@@ -610,6 +756,15 @@ async def batch_generate(
     """批量生成多个章节（SSE 流式）"""
     async def event_stream():
         try:
+            # 创建一次 adapter，跨章节复用（省去重复解密 API key + 新建 httpx client）
+            adapter = None
+            model_result = await service.db.execute(
+                select(ModelConfig).where(ModelConfig.id == data.model_id)
+            )
+            model_config = model_result.scalar_one_or_none()
+            if model_config:
+                adapter = AdapterFactory.create(model_config)
+
             for i, co_id in enumerate(data.chapter_outline_ids):
                 # Get or create chapter
                 try:
@@ -624,6 +779,7 @@ async def batch_generate(
                     async for event in service.generate_chapter_stream(
                         chapter_id=chapter.id,
                         model_id=data.model_id,
+                        adapter=adapter,
                     ):
                         yield f"data: {event}\n\n"
                 except Exception as e:
@@ -662,3 +818,53 @@ async def analyze_pacing(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"节奏分析失败: {type(e).__name__}: {str(e)}")
+
+
+@router.post("/projects/{project_id}/cross-chapter-consistency", response_model=CrossChapterConsistencyResponse)
+async def cross_chapter_consistency(
+    project_id: uuid.UUID,
+    model_id: uuid.UUID,
+    from_chapter: Optional[int] = None,
+    to_chapter: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """跨章节一致性扫描"""
+    try:
+        service = ConsistencyService(db)
+        results = await service.cross_chapter_check(project_id, model_id, from_chapter, to_chapter)
+        return results
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"跨章一致性检查失败: {type(e).__name__}: {str(e)}")
+
+
+@router.get("/projects/{project_id}/chapters-for-chat")
+async def chapters_for_chat(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """获取项目下的章节列表（供聊天引用选择），只返回 id + 标题 + 章节号"""
+    # 通过 outline 查找
+    ol_result = await db.execute(
+        select(Outline).where(Outline.project_id == project_id)
+    )
+    outline = ol_result.scalar_one_or_none()
+    if not outline:
+        return []
+
+    result = await db.execute(
+        select(ChapterOutline, Chapter.id)
+        .outerjoin(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
+        .where(ChapterOutline.outline_id == outline.id)
+        .order_by(ChapterOutline.chapter_number)
+    )
+    rows = result.all()
+    return [
+        {
+            "id": str(chapter_id) if chapter_id else str(co.id),
+            "title": co.title or f"第{co.chapter_number}章",
+            "chapter_number": co.chapter_number,
+        }
+        for co, chapter_id in rows
+    ]

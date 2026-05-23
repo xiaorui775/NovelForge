@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import engine, Base
-from app.routers import models, projects, outlines, chapters, export, characters, worldviews, terminology, backup, prompt_templates, cost_budget, analytics, foreshadowing, chat, cover_images, search, story_templates, scenes, notes, character_arcs, story_bible, writing_goals
+from app.routers import models, projects, outlines, chapters, export, characters, worldviews, terminology, backup, prompt_templates, cost_budget, analytics, foreshadowing, chat, cover_images, search, story_templates, scenes, notes, character_arcs, story_bible, writing_goals, series
 from app.services.seed_service import seed_prompt_templates, seed_sample_data
 from app.services.story_template_service import seed_templates
 from app.database import async_session
@@ -80,6 +80,7 @@ app.include_router(notes.router, prefix="/api")
 app.include_router(character_arcs.router, prefix="/api")
 app.include_router(story_bible.router, prefix="/api")
 app.include_router(writing_goals.router, prefix="/api")
+app.include_router(series.router, prefix="/api")
 
 
 @app.get("/api/health")

@@ -10,6 +10,52 @@ from app.schemas.cost_budget import CostBudgetCreate, CostBudgetUpdate
 
 
 class CostBudgetService:
+    # 常见模型默认价格 (USD per 1K tokens)
+    DEFAULT_PRICING = {
+        "gpt-4": {"input": 0.03, "output": 0.06},
+        "gpt-4-turbo": {"input": 0.01, "output": 0.03},
+        "gpt-4o": {"input": 0.005, "output": 0.015},
+        "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+        "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015},
+        "o1-mini": {"input": 0.003, "output": 0.012},
+        "o1-preview": {"input": 0.015, "output": 0.06},
+        "claude-3-opus": {"input": 0.015, "output": 0.075},
+        "claude-3-sonnet": {"input": 0.003, "output": 0.015},
+        "claude-3-haiku": {"input": 0.00025, "output": 0.00125},
+        "deepseek-chat": {"input": 0.00014, "output": 0.00028},
+        "deepseek-coder": {"input": 0.00014, "output": 0.00028},
+        "glm-4": {"input": 0.014, "output": 0.014},
+        "moonshot-v1-8k": {"input": 0.012, "output": 0.012},
+        "qwen-turbo": {"input": 0.0003, "output": 0.0006},
+        "qwen-plus": {"input": 0.004, "output": 0.012},
+        "qwen-max": {"input": 0.016, "output": 0.064},
+    }
+
+    @staticmethod
+    def get_effective_rates(model_config) -> tuple[float, float]:
+        """获取有效的输入/输出价格，如果配置为 0 则使用默认价格"""
+        input_rate = float(model_config.input_cost_per_1k)
+        output_rate = float(model_config.output_cost_per_1k)
+        if input_rate > 0 and output_rate > 0:
+            return input_rate, output_rate
+        name = (model_config.model_name or "").lower()
+        for key, pricing in CostBudgetService.DEFAULT_PRICING.items():
+            if key in name:
+                return pricing["input"], pricing["output"]
+        return input_rate or 0.002, output_rate or 0.006
+
+    @staticmethod
+    def calculate_cost(model_config, input_tokens: int, output_tokens: int) -> float:
+        """计算单次 AI 调用的费用"""
+        input_rate, output_rate = CostBudgetService.get_effective_rates(model_config)
+        return input_rate * input_tokens / 1000 + output_rate * output_tokens / 1000
+
+    async def calculate_and_record(self, model_config, input_tokens: int, output_tokens: int) -> float:
+        """计算费用并记录到预算"""
+        cost = self.calculate_cost(model_config, input_tokens, output_tokens)
+        cost = round(cost, 6)
+        await self.record_cost(Decimal(str(cost)))
+        return cost
     def __init__(self, db: AsyncSession):
         self.db = db
 

@@ -29,6 +29,7 @@ class Chapter(Base):
     chapter_outline: Mapped["ChapterOutline"] = relationship(back_populates="chapter")  # noqa: F821
     versions: Mapped[list["ChapterVersion"]] = relationship(back_populates="chapter", order_by="ChapterVersion.version_number", cascade="all, delete-orphan")  # noqa: F821
     scenes = relationship("Scene", back_populates="chapter", order_by="Scene.scene_number", cascade="all, delete-orphan")  # noqa: F821
+    summary = relationship("ChapterSummary", back_populates="chapter", uselist=False, cascade="all, delete-orphan")  # noqa: F821
 
 
 class ChapterVersion(Base):

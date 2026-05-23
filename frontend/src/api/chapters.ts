@@ -41,6 +41,9 @@ export interface ChapterGenerateRequest {
   score_threshold?: number;
   multi_round?: boolean;
   auto_revise?: boolean;
+  preview?: boolean;
+  temperature?: number;
+  top_p?: number;
 }
 
 export interface ValidationIssue {
@@ -78,6 +81,7 @@ export interface SSEEvent {
   score?: number;
   retry_count?: number;
   threshold?: number;
+  target?: number;
   max_retries?: number;
   round?: number;
   round_name?: string;
@@ -96,6 +100,7 @@ export interface SSEEvent {
   direction?: ChapterBrainstormDirection;
   directions?: ChapterBrainstormDirection[];
   transition_text?: string;
+  preview_version_id?: string;
 }
 
 export interface QualityScore {
@@ -133,6 +138,20 @@ export interface ConsistencyCheckResult {
   overall_score: number;
   issues: ConsistencyIssue[];
   summary: string;
+}
+
+export interface CrossChapterConsistencyIssue {
+  dimension: string;
+  severity: 'info' | 'warning' | 'error';
+  from_chapter: number | null;
+  description: string;
+  suggestion: string | null;
+}
+
+export interface CrossChapterConsistencyResult {
+  issues: CrossChapterConsistencyIssue[];
+  summary: string;
+  chapters_scanned: number;
 }
 
 export interface ChapterContext {
@@ -185,8 +204,22 @@ export const chaptersApi = {
   listVersions: (chapterId: string) =>
     client.get<ChapterVersion[]>(`/chapters/${chapterId}/versions`),
 
+  getLatestPreview: (chapterId: string) =>
+    client.get<ChapterVersion>(`/chapters/${chapterId}/latest-preview`),
+
   restoreVersion: (chapterId: string, versionId: string) =>
     client.post<Chapter>(`/chapters/${chapterId}/versions/${versionId}/restore`),
+
+  adoptVersion: (chapterId: string, versionId: string) =>
+    client.post<Chapter>(`/chapters/${chapterId}/versions/${versionId}/adopt`),
+
+  discardVersion: (chapterId: string, versionId: string) =>
+    client.post(`/chapters/${chapterId}/versions/${versionId}/discard`),
+
+  getSummary: (chapterId: string) =>
+    client.get<{ exists: boolean; events?: unknown[]; character_states?: Record<string, unknown>; unresolved_hooks?: unknown[]; resolved_hooks?: unknown[]; timeline?: string; locations?: unknown[]; narrative_threads?: unknown[]; word_count_at_summary?: number; is_stale?: boolean; generated_at?: string }>(
+      `/chapters/${chapterId}/summary`,
+    ),
 
   compareVersions: (chapterId: string, v1Id: string, v2Id: string) =>
     client.get<{ v1: VersionCompare; v2: VersionCompare }>(
@@ -194,10 +227,19 @@ export const chaptersApi = {
     ),
 
   scoreChapter: (chapterId: string, modelId: string) =>
-    client.post<QualityScore>(`/chapters/${chapterId}/score`, { model_id: modelId }),
+    client.post<QualityScore>(`/chapters/${chapterId}/score`, { model_id: modelId }, { timeout: 120000 }),
 
   checkConsistency: (chapterId: string, modelId: string) =>
-    client.post<ConsistencyCheckResult>(`/chapters/${chapterId}/check-consistency`, { model_id: modelId }),
+    client.post<ConsistencyCheckResult>(`/chapters/${chapterId}/check-consistency`, { model_id: modelId }, { timeout: 120000 }),
+
+  crossChapterConsistency: (projectId: string, modelId: string, fromChapter?: number, toChapter?: number) =>
+    client.post<CrossChapterConsistencyResult>(
+      `/projects/${projectId}/cross-chapter-consistency?model_id=${modelId}` +
+      (fromChapter ? `&from_chapter=${fromChapter}` : '') +
+      (toChapter ? `&to_chapter=${toChapter}` : ''),
+      {},
+      { timeout: 180000 },
+    ),
 
   estimateCost: (chapterId: string, modelId: string, templateId?: string) =>
     client.post<CostEstimate>(`/chapters/${chapterId}/estimate-cost`, {

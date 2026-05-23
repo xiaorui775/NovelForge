@@ -26,9 +26,7 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   const oldLines = oldText.split('\n');
   const newLines = newText.split('\n');
 
-  // Guard against huge inputs
   if (oldLines.length > MAX_LINES || newLines.length > MAX_LINES) {
-    // Fall back to simple line-by-line comparison
     const maxLen = Math.min(oldLines.length, newLines.length, MAX_LINES);
     const result: DiffLine[] = [];
     for (let i = 0; i < maxLen; i++) {
@@ -51,7 +49,6 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   const m = oldLines.length;
   const n = newLines.length;
 
-  // Build LCS table
   const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
@@ -63,7 +60,6 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
     }
   }
 
-  // Backtrack to produce diff
   let i = m;
   let j = n;
   const temp: DiffLine[] = [];
@@ -86,7 +82,6 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   return temp;
 }
 
-// Build aligned side-by-side rows: each row has a left and right entry
 function buildSideBySide(diffLines: DiffLine[]): { left: DiffLine | null; right: DiffLine | null }[] {
   const rows: { left: DiffLine | null; right: DiffLine | null }[] = [];
   let i = 0;
@@ -96,19 +91,16 @@ function buildSideBySide(diffLines: DiffLine[]): { left: DiffLine | null; right:
       rows.push({ left: line, right: line });
       i++;
     } else if (line.type === 'removed') {
-      // Collect consecutive removals
       const removals: DiffLine[] = [];
       while (i < diffLines.length && diffLines[i].type === 'removed') {
         removals.push(diffLines[i]);
         i++;
       }
-      // Collect consecutive additions
       const additions: DiffLine[] = [];
       while (i < diffLines.length && diffLines[i].type === 'added') {
         additions.push(diffLines[i]);
         i++;
       }
-      // Pair them up
       const maxLen = Math.max(removals.length, additions.length);
       for (let k = 0; k < maxLen; k++) {
         rows.push({
@@ -142,24 +134,24 @@ export default function VersionDiff({ v1, v2, onClose }: Props) {
   }, [diffLines]);
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/70">
+    <div className="fixed inset-0 z-50 flex flex-col bg-study-deep">
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-study-border/40 bg-study-card/95">
+      <div className="flex items-center justify-between px-6 py-3 border-b border-study-border/50 bg-study-surface">
         <div className="flex items-center gap-6">
           <h3 className="font-display text-lg font-bold text-parchment">版本对比</h3>
-          <div className="flex items-center gap-4 text-[11px]">
-            <span className="flex items-center gap-1.5 text-parchment-dim/60">
-              <span className="w-3 h-3 rounded bg-red-500/20 border border-red-500/40" />
+          <div className="flex items-center gap-4 text-xs">
+            <span className="flex items-center gap-1.5 text-parchment-dim/70">
+              <span className="w-2.5 h-2.5 rounded-sm bg-red-400/30 border border-red-400/50" />
               v{v1.version_number}
               {v1.quality_score !== null && (
                 <span className="font-mono text-parchment-dim/40">({v1.quality_score.toFixed(1)})</span>
               )}
             </span>
-            <svg className="w-3.5 h-3.5 text-parchment-dim/30" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+            <svg className="w-4 h-4 text-parchment-dim/25" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
             </svg>
-            <span className="flex items-center gap-1.5 text-parchment-dim/60">
-              <span className="w-3 h-3 rounded bg-green-500/20 border border-green-500/40" />
+            <span className="flex items-center gap-1.5 text-parchment-dim/70">
+              <span className="w-2.5 h-2.5 rounded-sm bg-green-400/30 border border-green-400/50" />
               v{v2.version_number}
               {v2.quality_score !== null && (
                 <span className="font-mono text-parchment-dim/40">({v2.quality_score.toFixed(1)})</span>
@@ -171,34 +163,31 @@ export default function VersionDiff({ v1, v2, onClose }: Props) {
           )}
         </div>
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-3 text-[11px] text-parchment-dim/50">
-            <span className="text-green-400/70">+{stats.added}</span>
-            <span className="text-red-400/70">-{stats.removed}</span>
+          <div className="flex items-center gap-3 text-xs text-parchment-dim/60">
+            <span className="text-green-400/80">+{stats.added}</span>
+            <span className="text-red-400/80">-{stats.removed}</span>
           </div>
-          <button onClick={onClose} className="btn-ghost text-xs">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
+          <button onClick={onClose} className="btn-secondary text-xs px-3 py-1.5">
+            关闭
           </button>
         </div>
       </div>
 
       {/* Diff content */}
-      <div className="flex-1 overflow-auto">
-        <div className="grid grid-cols-2 divide-x divide-study-border/30 min-h-full">
+      <div className="flex-1 overflow-auto bg-study-deep">
+        <div className="grid grid-cols-2 divide-x divide-study-border/40 min-h-full">
           {/* Left: old version */}
           <div>
-            <div className="px-3 py-2 bg-study-deep/50 border-b border-study-border/30 sticky top-0 z-10">
-              <span className="text-[11px] text-parchment-dim/40 font-mono">v{v1.version_number} · {v1.word_count.toLocaleString()} 字</span>
+            <div className="px-4 py-2.5 bg-study-surface border-b border-study-border/40 sticky top-0 z-10">
+              <span className="text-xs text-parchment-dim/60 font-medium">v{v1.version_number} · {v1.word_count.toLocaleString()} 字</span>
             </div>
-            <div>
+            <div className="px-2">
               {rows.map((row, idx) => {
                 const line = row.left;
                 if (!line) {
-                  // Empty placeholder for alignment
                   return (
-                    <div key={`l-${idx}`} className="flex font-mono text-[13px] leading-6 bg-green-500/4 min-h-[1.5rem]">
-                      <span className="w-12 flex-shrink-0 border-r border-study-border/20" />
+                    <div key={`l-${idx}`} className="flex font-mono text-[13px] leading-7 bg-green-500/5 min-h-[1.75rem]">
+                      <span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none" />
                       <span className="flex-1 px-3">&nbsp;</span>
                     </div>
                   );
@@ -206,17 +195,17 @@ export default function VersionDiff({ v1, v2, onClose }: Props) {
                 return (
                   <div
                     key={`l-${idx}`}
-                    className={`flex font-mono text-[13px] leading-6 ${
-                      line.type === 'removed' ? 'bg-red-500/8' : ''
+                    className={`flex font-mono text-[13px] leading-7 ${
+                      line.type === 'removed' ? 'bg-red-500/10' : 'hover:bg-study-glow/30'
                     }`}
                   >
-                    <span className="w-12 flex-shrink-0 text-right pr-3 text-parchment-dim/20 select-none border-r border-study-border/20">
-                      {line.type !== 'added' ? '' : ''}
+                    <span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none">
+                      {line.type === 'removed' ? '-' : ''}
                     </span>
                     <span className={`flex-1 px-3 whitespace-pre-wrap break-words ${
-                      line.type === 'removed' ? 'text-red-400/60 line-through' : 'text-parchment-dim/70'
+                      line.type === 'removed' ? 'text-red-400/70 line-through decoration-red-400/30' : 'text-parchment-dim/80'
                     }`}>
-                      {line.content || ' '}
+                      {line.content || ' '}
                     </span>
                   </div>
                 );
@@ -226,16 +215,16 @@ export default function VersionDiff({ v1, v2, onClose }: Props) {
 
           {/* Right: new version */}
           <div>
-            <div className="px-3 py-2 bg-study-deep/50 border-b border-study-border/30 sticky top-0 z-10">
-              <span className="text-[11px] text-parchment-dim/40 font-mono">v{v2.version_number} · {v2.word_count.toLocaleString()} 字</span>
+            <div className="px-4 py-2.5 bg-study-surface border-b border-study-border/40 sticky top-0 z-10">
+              <span className="text-xs text-parchment-dim/60 font-medium">v{v2.version_number} · {v2.word_count.toLocaleString()} 字</span>
             </div>
-            <div>
+            <div className="px-2">
               {rows.map((row, idx) => {
                 const line = row.right;
                 if (!line) {
                   return (
-                    <div key={`r-${idx}`} className="flex font-mono text-[13px] leading-6 bg-red-500/4 min-h-[1.5rem]">
-                      <span className="w-12 flex-shrink-0 border-r border-study-border/20" />
+                    <div key={`r-${idx}`} className="flex font-mono text-[13px] leading-7 bg-red-500/5 min-h-[1.75rem]">
+                      <span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none" />
                       <span className="flex-1 px-3">&nbsp;</span>
                     </div>
                   );
@@ -243,15 +232,17 @@ export default function VersionDiff({ v1, v2, onClose }: Props) {
                 return (
                   <div
                     key={`r-${idx}`}
-                    className={`flex font-mono text-[13px] leading-6 ${
-                      line.type === 'added' ? 'bg-green-500/8' : ''
+                    className={`flex font-mono text-[13px] leading-7 ${
+                      line.type === 'added' ? 'bg-green-500/10' : 'hover:bg-study-glow/30'
                     }`}
                   >
-                    <span className="w-12 flex-shrink-0 text-right pr-3 text-parchment-dim/20 select-none border-r border-study-border/20" />
+                    <span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none">
+                      {line.type === 'added' ? '+' : ''}
+                    </span>
                     <span className={`flex-1 px-3 whitespace-pre-wrap break-words ${
-                      line.type === 'added' ? 'text-green-400/70' : 'text-parchment-dim/70'
+                      line.type === 'added' ? 'text-green-400/80' : 'text-parchment-dim/80'
                     }`}>
-                      {line.content || ' '}
+                      {line.content || ' '}
                     </span>
                   </div>
                 );

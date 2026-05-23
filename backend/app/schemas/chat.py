@@ -8,6 +8,9 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     message: str = Field(..., max_length=10000)
     model_id: uuid.UUID
+    referenced_chapter_id: Optional[uuid.UUID] = None
+    referenced_text: Optional[str] = None
+    context_mode: str = "full"  # full, chapter, selection
 
 
 class ChatMessageResponse(BaseModel):
@@ -19,6 +22,10 @@ class ChatMessageResponse(BaseModel):
     content: str
     model_id: Optional[uuid.UUID] = None
     token_used: int
+    referenced_chapter_id: Optional[uuid.UUID] = None
+    referenced_text: Optional[str] = None
+    context_mode: Optional[str] = None
+    suggested_action: Optional[str] = None
     created_at: datetime
 
 

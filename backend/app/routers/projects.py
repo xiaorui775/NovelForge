@@ -1,6 +1,7 @@
+import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -151,3 +152,101 @@ async def get_project_timeline(project_id: uuid.UUID, limit: int = 50, db: Async
         })
 
     return events
+
+
+@router.post("/{project_id}/import-txt")
+async def import_txt(
+    project_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """导入 TXT 文件，自动按空行/标题拆分为章节"""
+    # 验证项目
+    proj_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = proj_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    # 读取文件内容
+    if not file.filename or not file.filename.endswith('.txt'):
+        raise HTTPException(status_code=400, detail="仅支持 .txt 文件")
+
+    content = (await file.read()).decode("utf-8", errors="replace")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="文件内容为空")
+
+    # 获取或创建大纲
+    ol_result = await db.execute(select(Outline).where(Outline.project_id == project_id))
+    outline = ol_result.scalars().first()
+    if not outline:
+        outline = Outline(project_id=project_id, total_chapters=0, synopsis=project.description or "")
+        db.add(outline)
+        await db.flush()
+
+    # 拆分章节：按连续空行分隔，或按「第X章」标题分隔
+    # 优先尝试标题模式
+    title_pattern = re.compile(r'^第[一二三四五六七八九十百千\d]+[章节回卷]', re.MULTILINE)
+    if title_pattern.search(content):
+        # 按标题拆分
+        splits = title_pattern.split(content)
+        titles = title_pattern.findall(content)
+        # splits[0] 是第一个标题前的内容（通常为空或序言）
+        chapters_text = []
+        for i, title in enumerate(titles):
+            body = splits[i + 1].strip() if i + 1 < len(splits) else ""
+            chapters_text.append((title.strip(), body))
+        if splits[0].strip():
+            chapters_text.insert(0, ("序章", splits[0].strip()))
+    else:
+        # 按连续空行拆分（2+ 个换行）
+        raw_parts = re.split(r'\n{2,}', content)
+        chapters_text = []
+        for i, part in enumerate(raw_parts):
+            text = part.strip()
+            if text:
+                first_line = text.split('\n', 1)[0][:30]
+                chapters_text.append((first_line, text))
+
+    if not chapters_text:
+        raise HTTPException(status_code=400, detail="未能从文件中识别章节内容")
+
+    # 获取现有章节号
+    existing_result = await db.execute(
+        select(ChapterOutline.chapter_number)
+        .where(ChapterOutline.outline_id == outline.id)
+        .order_by(ChapterOutline.chapter_number.desc())
+    )
+    existing_nums = [row[0] for row in existing_result.all()]
+    next_number = (max(existing_nums) + 1) if existing_nums else 1
+
+    created = []
+    for i, (title, body) in enumerate(chapters_text):
+        co = ChapterOutline(
+            outline_id=outline.id,
+            chapter_number=next_number + i,
+            title=title[:100],
+            summary=body[:200],
+            sort_order=next_number + i,
+        )
+        db.add(co)
+        await db.flush()
+        await db.refresh(co)
+
+        ch = Chapter(
+            chapter_outline_id=co.id,
+            content=body,
+            word_count=len(body),
+            status="completed",
+        )
+        db.add(ch)
+        created.append({
+            "chapter_outline_id": str(co.id),
+            "chapter_number": co.chapter_number,
+            "title": co.title,
+            "word_count": len(body),
+        })
+
+    outline.total_chapters = next_number + len(chapters_text) - 1
+    await db.flush()
+
+    return {"imported": len(created), "chapters": created}

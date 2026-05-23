@@ -35,6 +35,9 @@ class ChapterGenerateRequest(BaseModel):
     score_threshold: float = Field(default=6.0, ge=0, le=10)
     multi_round: bool = False
     auto_revise: bool = False
+    preview: bool = False  # 预览模式：只写入版本记录，不覆盖正文
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class ChapterVersionResponse(BaseModel):
@@ -82,6 +85,20 @@ class ConsistencyIssue(BaseModel):
     description: str
     location: Optional[str] = None
     suggestion: Optional[str] = None
+
+
+class CrossChapterConsistencyIssue(BaseModel):
+    dimension: str
+    severity: str
+    from_chapter: Optional[int] = None
+    description: str
+    suggestion: Optional[str] = None
+
+
+class CrossChapterConsistencyResponse(BaseModel):
+    issues: list[CrossChapterConsistencyIssue]
+    summary: str
+    chapters_scanned: int
 
 
 class ConsistencyCheckResponse(BaseModel):

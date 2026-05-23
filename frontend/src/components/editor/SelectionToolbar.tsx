@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { chaptersApi, SSEEvent } from '../../api/chapters';
 
 interface SelectionToolbarProps {
@@ -27,6 +28,8 @@ export default function SelectionToolbar({
   onApplyRewrite,
   generating,
 }: SelectionToolbarProps) {
+  const navigate = useNavigate();
+  const { id: projectId } = useParams<{ id: string }>();
   const [selection, setSelection] = useState<{ start: number; end: number; text: string } | null>(null);
   const [showToolbar, setShowToolbar] = useState(false);
   const [position, setPosition] = useState({ top: 0, left: 0 });
@@ -150,6 +153,15 @@ export default function SelectionToolbar({
     setCustomInstruction('');
   };
 
+  const handleAskAI = () => {
+    if (!selection || !projectId) return;
+    const params = new URLSearchParams({
+      chapterId: chapterId || '',
+      selectedText: selection.text,
+    });
+    navigate(`/projects/${projectId}/chat?${params.toString()}`);
+  };
+
   if (!showToolbar || !selection) return null;
 
   return (
@@ -243,6 +255,19 @@ export default function SelectionToolbar({
               </button>
             ))}
           </div>
+        )}
+
+        {/* Ask AI - navigate to chat with context */}
+        {!rewrittenText && !showCustomInput && (
+          <button
+            onClick={handleAskAI}
+            className="w-full flex items-center justify-center gap-1.5 text-[11px] px-2 py-2 rounded-lg bg-ink/10 text-ink/70 hover:bg-ink/20 hover:text-ink transition-all mb-2 border border-ink/10"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
+            </svg>
+            问 AI
+          </button>
         )}
 
         {/* Custom instruction input */}

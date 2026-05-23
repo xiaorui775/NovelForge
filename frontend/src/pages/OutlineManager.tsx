@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useProjectStore } from '../stores/projectStore';
 import { useModelState } from '../stores/modelStore';
 import { outlinesApi, Outline, ChapterOutline } from '../api/outlines';
 import { requestNotificationPermission, sendNotification } from '../utils/notify';
-import { chaptersApi } from '../api/chapters';
+import { chaptersApi, CrossChapterConsistencyResult } from '../api/chapters';
+import { projectsApi } from '../api/projects';
 import { useUIStore } from '../stores/uiStore';
 import { useConfirm } from '../components/ConfirmDialog';
 import ReverseOutlineView from '../components/ReverseOutlineView';
@@ -24,10 +25,18 @@ export default function OutlineManager() {
   const [batchGenerating, setBatchGenerating] = useState(false);
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [synopsis, setSynopsis] = useState('');
+  const [totalChapters, setTotalChapters] = useState(20);
+  const [pacingStyle, setPacingStyle] = useState('');
   const [newChapter, setNewChapter] = useState({ title: '', summary: '' });
   const [expandingDetail, setExpandingDetail] = useState<string | null>(null);
   const [generatingOutline, setGeneratingOutline] = useState(false);
   const [showReverseOutline, setShowReverseOutline] = useState(false);
+  const [crossChapterResult, setCrossChapterResult] = useState<CrossChapterConsistencyResult | null>(null);
+  const [crossChapterChecking, setCrossChapterChecking] = useState(false);
+  const [splitTarget, setSplitTarget] = useState<string | null>(null);
+  const [splitPosition, setSplitPosition] = useState(1);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (projectId) {
@@ -119,7 +128,7 @@ export default function OutlineManager() {
     if (!projectId || !selectedModel) { showToast('error', '请先选择模型'); return; }
     setGeneratingOutline(true);
     try {
-      const { data } = await outlinesApi.generateOutline(projectId, selectedModel, synopsis);
+      const { data } = await outlinesApi.generateOutline(projectId, selectedModel, synopsis, totalChapters, pacingStyle);
       setOutline(data);
       const { data: chapterList } = await outlinesApi.listChapters(data.id);
       setChapters(chapterList);
@@ -156,6 +165,68 @@ export default function OutlineManager() {
         setBatchGenerating(false);
       },
     );
+  };
+
+  const handleCrossChapterCheck = async () => {
+    if (!projectId || !selectedModel) { showToast('error', '请先选择模型'); return; }
+    setCrossChapterChecking(true);
+    setCrossChapterResult(null);
+    try {
+      const { data } = await chaptersApi.crossChapterConsistency(projectId, selectedModel);
+      setCrossChapterResult(data);
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      showToast('error', detail || '跨章一致性检查失败');
+    }
+    setCrossChapterChecking(false);
+  };
+
+  const handleSplitChapter = async (chapterOutlineId: string) => {
+    if (!outline) return;
+    try {
+      await outlinesApi.splitChapter(chapterOutlineId, splitPosition);
+      const { data: chapterList } = await outlinesApi.listChapters(outline.id);
+      setChapters(chapterList);
+      setSplitTarget(null);
+      showToast('success', '章节已拆分');
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      showToast('error', detail || '拆分失败');
+    }
+  };
+
+  const handleMergeChapter = async (chapterOutlineId: string, nextChapterOutlineId: string) => {
+    if (!await confirm({ message: '确认将下一章合并到当前章节？下一章内容将追加到末尾。', variant: 'danger', confirmText: '合并' })) return;
+    if (!outline) return;
+    try {
+      await outlinesApi.mergeChapters(chapterOutlineId, nextChapterOutlineId);
+      const { data: chapterList } = await outlinesApi.listChapters(outline.id);
+      setChapters(chapterList);
+      showToast('success', '章节已合并');
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      showToast('error', detail || '合并失败');
+    }
+  };
+
+  const handleImportTxt = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !projectId) return;
+    if (!file.name.endsWith('.txt')) {
+      showToast('error', '仅支持 .txt 文件');
+      return;
+    }
+    setImporting(true);
+    try {
+      const { data } = await projectsApi.importTxt(projectId, file);
+      showToast('success', `成功导入 ${data.imported} 个章节`);
+      loadOutline();
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      showToast('error', detail || '导入失败');
+    }
+    setImporting(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   if (loading) {
@@ -232,6 +303,17 @@ export default function OutlineManager() {
                 </svg>
                 AI 生成
               </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={importing}
+                className="btn-secondary text-sm flex items-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                {importing ? '导入中...' : '导入 TXT'}
+              </button>
+              <input ref={fileInputRef} type="file" accept=".txt" onChange={handleImportTxt} className="hidden" />
             </div>
           </div>
         )}
@@ -247,6 +329,32 @@ export default function OutlineManager() {
             value={synopsis}
             onChange={(e) => setSynopsis(e.target.value)}
           />
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            <div>
+              <label className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block mb-1.5">章节数</label>
+              <input
+                type="number"
+                className="input w-full text-sm py-2"
+                min={5}
+                max={100}
+                value={totalChapters}
+                onChange={(e) => setTotalChapters(parseInt(e.target.value) || 20)}
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block mb-1.5">节奏风格</label>
+              <select
+                className="input w-full text-sm py-2"
+                value={pacingStyle}
+                onChange={(e) => setPacingStyle(e.target.value)}
+              >
+                <option value="">默认</option>
+                <option value="fast">快节奏（爽文/悬疑）</option>
+                <option value="slow">慢节奏（文学/言情）</option>
+                <option value="balanced">张弛有度</option>
+              </select>
+            </div>
+          </div>
           <div className="flex gap-3">
             <button onClick={handleCreateOutline} className="btn-primary text-sm">手动创建</button>
             <button
@@ -332,6 +440,41 @@ export default function OutlineManager() {
                 </svg>
                 反向大纲
               </button>
+              <button
+                onClick={handleCrossChapterCheck}
+                disabled={crossChapterChecking || !selectedModel || chapters.length < 2}
+                className="btn-ghost text-sm flex items-center gap-1.5"
+                title="跨章节一致性扫描：检查角色状态、时间线、地点等跨章矛盾"
+              >
+                {crossChapterChecking ? (
+                  <>
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    扫描中...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+                    </svg>
+                    跨章检查
+                  </>
+                )}
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={importing}
+                className="btn-ghost text-sm flex items-center gap-1.5"
+                title="导入 TXT 文件，自动拆分为章节"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                {importing ? '导入中...' : '导入'}
+              </button>
+              <input ref={fileInputRef} type="file" accept=".txt" onChange={handleImportTxt} className="hidden" />
             </div>
           </div>
 
@@ -418,6 +561,26 @@ export default function OutlineManager() {
                       写章节
                     </Link>
                     <button
+                      onClick={() => { setSplitTarget(chapter.id); setSplitPosition(1); }}
+                      className="p-1.5 text-parchment-dim/30 hover:text-ink transition-colors rounded-md hover:bg-study-glow"
+                      title="拆分章节"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 3.75H6A2.25 2.25 0 003.75 6v1.5M16.5 3.75H18A2.25 2.25 0 0120.25 6v1.5m0 9V18A2.25 2.25 0 0118 20.25h-1.5m-9 0H6A2.25 2.25 0 013.75 18v-1.5" />
+                      </svg>
+                    </button>
+                    {index < chapters.length - 1 && (
+                      <button
+                        onClick={() => handleMergeChapter(chapter.id, chapters[index + 1].id)}
+                        className="p-1.5 text-parchment-dim/30 hover:text-ink transition-colors rounded-md hover:bg-study-glow"
+                        title="与下一章合并"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25h1.5m9 0H18a2.25 2.25 0 002.25-2.25V6A2.25 2.25 0 0018 3.75h-1.5" />
+                        </svg>
+                      </button>
+                    )}
+                    <button
                       onClick={() => handleDeleteChapter(chapter.id)}
                       className="p-1.5 text-parchment-dim/30 hover:text-red-400 transition-colors rounded-md hover:bg-red-400/10"
                     >
@@ -432,6 +595,87 @@ export default function OutlineManager() {
           )}
         </div>
       )}
+      {/* Split chapter modal */}
+      {splitTarget && (
+        <div className="card border border-ink/20 animate-slide-up">
+          <h3 className="font-display text-lg font-semibold text-parchment mb-3">拆分章节</h3>
+          <p className="text-sm text-parchment-dim/60 mb-3">在第几段之后拆分？前半段留在当前章节，后半段成为新章节。</p>
+          <div className="flex items-center gap-3 mb-4">
+            <label className="text-sm text-parchment-dim/70">拆分位置</label>
+            <input
+              type="number"
+              className="input w-24 text-sm py-2"
+              min={1}
+              value={splitPosition}
+              onChange={(e) => setSplitPosition(parseInt(e.target.value) || 1)}
+            />
+            <span className="text-xs text-parchment-dim/40">段之后</span>
+          </div>
+          <div className="flex gap-3">
+            <button onClick={() => handleSplitChapter(splitTarget)} className="btn-primary text-sm">确认拆分</button>
+            <button onClick={() => setSplitTarget(null)} className="btn-ghost text-sm">取消</button>
+          </div>
+        </div>
+      )}
+
+      {/* Cross-chapter consistency result */}
+      {crossChapterResult && (
+        <div className="card border border-ink/20 animate-slide-up">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="section-title">跨章一致性检查</div>
+              <span className="text-xs text-parchment-dim/40">已扫描 {crossChapterResult.chapters_scanned} 章</span>
+            </div>
+            <button onClick={() => setCrossChapterResult(null)} className="text-parchment-dim/40 hover:text-ink transition-colors">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          {crossChapterResult.issues.length > 0 ? (
+            <div className="space-y-2">
+              {crossChapterResult.issues.map((issue, i) => (
+                <div key={i} className={`p-3 rounded-lg text-sm ${
+                  issue.severity === 'error' ? 'bg-red-500/10 border-l-3 border-red-500/50' :
+                  issue.severity === 'warning' ? 'bg-amber-500/10 border-l-3 border-amber-500/50' :
+                  'bg-study-deep border-l-3 border-study-border'
+                }`}>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`text-xs font-medium ${
+                      issue.severity === 'error' ? 'text-red-400' :
+                      issue.severity === 'warning' ? 'text-amber-400' :
+                      'text-parchment-dim/60'
+                    }`}>
+                      {issue.dimension === 'character' ? '角色状态' :
+                       issue.dimension === 'timeline' ? '时间线' :
+                       issue.dimension === 'location' ? '地点' :
+                       issue.dimension === 'foreshadowing' ? '伏笔' : issue.dimension}
+                    </span>
+                    {issue.from_chapter && (
+                      <span className="text-[11px] text-parchment-dim/40">第 {issue.from_chapter} 章</span>
+                    )}
+                  </div>
+                  <p className="text-parchment-dim/70 leading-relaxed">{issue.description}</p>
+                  {issue.suggestion && <p className="text-parchment-dim/45 mt-1 text-xs">建议：{issue.suggestion}</p>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-6">
+              <svg className="w-10 h-10 text-green-400/40 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <p className="text-sm text-green-400/60">未发现跨章一致性问题</p>
+            </div>
+          )}
+          {crossChapterResult.summary && (
+            <p className="text-xs text-parchment-dim/40 leading-relaxed mt-4 pt-3 border-t border-study-border/30">
+              {crossChapterResult.summary}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Reverse outline modal */}
       {showReverseOutline && outline && selectedModel && (
         <ReverseOutlineView

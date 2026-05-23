@@ -22,7 +22,7 @@ export interface CoverImageGenerate {
 
 export const coversApi = {
   generate: (projectId: string, data: CoverImageGenerate) =>
-    client.post<CoverImage>(`/projects/${projectId}/covers/generate`, data),
+    client.post<CoverImage>(`/projects/${projectId}/covers/generate`, data, { timeout: 180000 }),
 
   list: (projectId: string) =>
     client.get<{ items: CoverImage[] }>(`/projects/${projectId}/covers`),

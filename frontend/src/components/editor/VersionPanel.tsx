@@ -13,6 +13,8 @@ interface VersionPanelProps {
 function changeTypeLabel(changeType: string): { label: string; className: string } {
   if (changeType === 'user_edit') return { label: '手动编辑', className: 'bg-blue-500/15 text-blue-400' };
   if (changeType === 'restore') return { label: '版本恢复', className: 'bg-purple-500/15 text-purple-400' };
+  if (changeType === 'preview') return { label: '预览生成', className: 'bg-amber-500/15 text-amber-400' };
+  if (changeType === 'adopt_preview') return { label: '采纳预览', className: 'bg-teal-500/15 text-teal-400' };
   return { label: 'AI 生成', className: 'bg-emerald-500/15 text-emerald-400' };
 }
 

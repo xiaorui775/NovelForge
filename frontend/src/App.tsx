@@ -27,6 +27,7 @@ const StoryTemplates = lazy(() => import('./pages/StoryTemplates'));
 const StoryHealth = lazy(() => import('./pages/StoryHealth'));
 const ProjectList = lazy(() => import('./pages/ProjectList'));
 const StoryBible = lazy(() => import('./pages/StoryBible'));
+const SeriesManager = lazy(() => import('./pages/SeriesManager'));
 const NotFound = lazy(() => import('./pages/NotFound'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
@@ -69,6 +70,7 @@ function App() {
         <Route path="prompts" element={<LazyRoute><PromptTemplateManager /></LazyRoute>} />
         <Route path="cost-budget" element={<LazyRoute><CostBudgetSettings /></LazyRoute>} />
         <Route path="analytics" element={<LazyRoute><Analytics /></LazyRoute>} />
+        <Route path="series" element={<LazyRoute><SeriesManager /></LazyRoute>} />
         <Route path="projects/:id/read" element={<LazyRoute><ReadingMode /></LazyRoute>} />
         <Route path="projects/:id/read/:chapterIndex" element={<LazyRoute><ReadingMode /></LazyRoute>} />
         <Route path="*" element={<LazyRoute><NotFound /></LazyRoute>} />

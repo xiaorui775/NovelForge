@@ -20,6 +20,8 @@ class Project(Base):
     target_words_per_chapter_min: Mapped[int] = mapped_column(Integer, default=3000)
     target_words_per_chapter_max: Mapped[int] = mapped_column(Integer, default=5000)
     worldview_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("worldviews.id"))
+    series_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("series.id", ondelete="SET NULL"), nullable=True)
+    sort_order_in_series: Mapped[int] = mapped_column(Integer, default=1)
     cover_image: Mapped[Optional[str]] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(20), default="draft")
     style_reference: Mapped[Optional[str]] = mapped_column(Text)
@@ -31,6 +33,7 @@ class Project(Base):
 
     outline: Mapped["Optional[Outline]"] = relationship(back_populates="project", cascade="all, delete-orphan")  # noqa: F821
     worldview: Mapped["Worldview | None"] = relationship(back_populates="projects")  # noqa: F821
+    series: Mapped["Series | None"] = relationship(back_populates="projects")  # noqa: F821
     foreshadowings = relationship("Foreshadowing", back_populates="project", cascade="all, delete-orphan")  # noqa: F821
     chat_messages = relationship("ChatMessage", back_populates="project", cascade="all, delete-orphan")  # noqa: F821
     cover_images = relationship("CoverImage", back_populates="project", cascade="all, delete-orphan")  # noqa: F821

@@ -88,11 +88,19 @@ export const outlinesApi = {
     client.put<ChapterOutline[]>(`/outlines/${outlineId}/chapters/reorder`, items),
 
   expandDetail: (chapterOutlineId: string, modelId: string) =>
-    client.post<ChapterOutline>(`/chapter-outlines/${chapterOutlineId}/expand-detail`, { model_id: modelId }),
+    client.post<ChapterOutline>(`/chapter-outlines/${chapterOutlineId}/expand-detail`, { model_id: modelId }, { timeout: 180000 }),
 
-  generateOutline: (projectId: string, modelId: string, synopsis: string = '') =>
-    client.post<Outline>(`/projects/${projectId}/outline/generate`, { model_id: modelId, synopsis }),
+  generateOutline: (projectId: string, modelId: string, synopsis: string = '', totalChapters: number = 20, pacingStyle: string = '') =>
+    client.post<Outline>(`/projects/${projectId}/outline/generate`, {
+      model_id: modelId, synopsis, total_chapters: totalChapters, pacing_style: pacingStyle,
+    }, { timeout: 180000 }),
 
   reverseOutline: (outlineId: string, modelId: string) =>
-    client.post<ReverseOutlineResult>(`/outlines/${outlineId}/reverse-outline`, { model_id: modelId }),
+    client.post<ReverseOutlineResult>(`/outlines/${outlineId}/reverse-outline`, { model_id: modelId }, { timeout: 180000 }),
+
+  splitChapter: (chapterOutlineId: string, splitPosition: number) =>
+    client.post<ChapterOutline[]>(`/chapter-outlines/${chapterOutlineId}/split`, { split_position: splitPosition }),
+
+  mergeChapters: (chapterOutlineId: string, chapterOutlineId2: string) =>
+    client.post<ChapterOutline>(`/chapter-outlines/${chapterOutlineId}/merge`, { chapter_outline_id_2: chapterOutlineId2 }),
 };

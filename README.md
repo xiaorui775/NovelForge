@@ -158,6 +158,30 @@ docker-compose ps
 - 数据库迁移和种子数据自动执行
 - 默认 Prompt 模板和示例数据自动创建
 
+**版本升级**：
+
+当更新代码后，需要手动执行数据库迁移以应用新表和字段变更：
+
+```bash
+# Docker 部署
+docker-compose exec backend alembic upgrade head
+
+# 本地开发
+cd backend
+alembic upgrade head
+```
+
+查看当前数据库迁移状态：
+
+```bash
+# Docker 部署
+docker-compose exec backend alembic current
+
+# 本地开发
+cd backend
+alembic current
+```
+
 **停止服务**：
 ```bash
 docker-compose down

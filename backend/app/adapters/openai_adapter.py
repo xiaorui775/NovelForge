@@ -5,7 +5,7 @@ from typing import AsyncGenerator, Optional
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from app.adapters.base import BaseModelAdapter
+from app.adapters.base import BaseModelAdapter, UsageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,7 @@ class OpenAIAdapter(BaseModelAdapter):
     _stream_client: Optional[httpx.AsyncClient] = None
 
     def __init__(self, base_url: str, api_key: str, model_name: str, max_tokens: int = 4096):
+        super().__init__()
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_name = model_name
@@ -96,31 +97,45 @@ class OpenAIAdapter(BaseModelAdapter):
         content = data["choices"][0]["message"]["content"]
         usage = data.get("usage", {})
 
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        if prompt_tokens > 0 or completion_tokens > 0:
+            self._last_usage = UsageInfo(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+
         return {
             "content": content,
-            "token_input": usage.get("prompt_tokens", 0),
-            "token_output": usage.get("completion_tokens", 0),
+            "token_input": prompt_tokens,
+            "token_output": completion_tokens,
         }
 
     async def generate_stream(
         self, messages: list[dict], **kwargs
     ) -> AsyncGenerator[str, None]:
         max_tokens = kwargs.get("max_tokens", self.max_tokens)
+        temperature = kwargs.get("temperature")
+        top_p = kwargs.get("top_p")
         max_retries = 3
+        self._last_usage = None
 
         for attempt in range(max_retries):
             try:
                 client = self._get_stream_client()
+                body = {
+                    "model": self.model_name,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                if temperature is not None:
+                    body["temperature"] = temperature
+                if top_p is not None:
+                    body["top_p"] = top_p
                 async with client.stream(
                     "POST",
                     f"{self.base_url}/chat/completions",
                     headers=self._headers(),
-                    json={
-                        "model": self.model_name,
-                        "messages": messages,
-                        "max_tokens": max_tokens,
-                        "stream": True,
-                    },
+                    json=body,
                 ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():
@@ -131,6 +146,13 @@ class OpenAIAdapter(BaseModelAdapter):
                             break
                         try:
                             data = json.loads(data_str)
+                            # 提取 usage（stream 最后一个 chunk 可能包含）
+                            usage = data.get("usage")
+                            if usage and usage.get("prompt_tokens"):
+                                self._last_usage = UsageInfo(
+                                    prompt_tokens=usage.get("prompt_tokens", 0),
+                                    completion_tokens=usage.get("completion_tokens", 0),
+                                )
                             delta = data["choices"][0].get("delta", {})
                             content = delta.get("content", "")
                             if content:

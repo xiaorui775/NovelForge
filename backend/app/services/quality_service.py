@@ -10,6 +10,8 @@ from app.models.chapter import Chapter
 from app.models.model_config import ModelConfig
 from app.models.outline import ChapterOutline, Outline
 from app.models.project import Project
+from app.services.common import load_chapter_chain_with_model
+from app.utils.json_extract import extract_json
 
 
 class QualityService:
@@ -22,44 +24,14 @@ class QualityService:
         model_id: uuid.UUID,
     ) -> dict:
         """对章节进行 AI 质量评分"""
-        # 获取章节
-        chapter_result = await self.db.execute(select(Chapter).where(Chapter.id == chapter_id))
-        chapter = chapter_result.scalar_one_or_none()
-        if not chapter:
-            raise ValueError("章节不存在")
+        chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
+        chapter = chain["chapter"]
+        chapter_outline = chain["chapter_outline"]
+        project = chain["project"]
+        model_config = chain["model_config"]
+
         if not chapter.content or len(chapter.content.strip()) < 50:
             raise ValueError("章节内容过短，无法评分")
-
-        # 获取章节大纲
-        outline_result = await self.db.execute(
-            select(ChapterOutline).where(ChapterOutline.id == chapter.chapter_outline_id)
-        )
-        chapter_outline = outline_result.scalar_one_or_none()
-        if not chapter_outline:
-            raise ValueError("章节大纲不存在")
-
-        # 获取大纲和项目
-        outline_result = await self.db.execute(
-            select(Outline).where(Outline.id == chapter_outline.outline_id)
-        )
-        outline = outline_result.scalar_one_or_none()
-        if not outline:
-            raise ValueError("大纲不存在")
-
-        project_result = await self.db.execute(
-            select(Project).where(Project.id == outline.project_id)
-        )
-        project = project_result.scalar_one_or_none()
-        if not project:
-            raise ValueError("项目不存在")
-
-        # 获取模型配置
-        model_result = await self.db.execute(
-            select(ModelConfig).where(ModelConfig.id == model_id)
-        )
-        model_config = model_result.scalar_one_or_none()
-        if not model_config:
-            raise ValueError("模型不存在")
 
         # 调用 AI 评分
         return await self.score_text(
@@ -109,13 +81,7 @@ class QualityService:
 
         # 解析 AI 返回的 JSON
         try:
-            raw = result["content"].strip()
-            # 尝试提取 JSON 部分
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            score_data = json.loads(raw)
+            score_data = extract_json(result["content"])
             return {
                 "coherence": min(10, max(0, float(score_data.get("coherence", 0)))),
                 "writing_quality": min(10, max(0, float(score_data.get("writing_quality", 0)))),

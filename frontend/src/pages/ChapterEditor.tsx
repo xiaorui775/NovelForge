@@ -79,6 +79,114 @@ function getParagraphHint(text: string): string {
   return '段落节奏基本平稳，可重点打磨关键词和情绪转折。';
 }
 
+// Preview diff component — reuses LCS diff logic from VersionDiff
+interface DiffLine {
+  type: 'equal' | 'added' | 'removed';
+  content: string;
+}
+
+function computeLineDiff(oldText: string, newText: string): DiffLine[] {
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
+  const MAX = 2000;
+  if (oldLines.length > MAX || newLines.length > MAX) {
+    const maxLen = Math.min(oldLines.length, newLines.length, MAX);
+    const result: DiffLine[] = [];
+    for (let i = 0; i < maxLen; i++) {
+      if (oldLines[i] === newLines[i]) result.push({ type: 'equal', content: oldLines[i] });
+      else { result.push({ type: 'removed', content: oldLines[i] }); result.push({ type: 'added', content: newLines[i] }); }
+    }
+    for (let i = maxLen; i < oldLines.length; i++) result.push({ type: 'removed', content: oldLines[i] });
+    for (let i = maxLen; i < newLines.length; i++) result.push({ type: 'added', content: newLines[i] });
+    return result;
+  }
+  const m = oldLines.length, n = newLines.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) {
+    if (oldLines[i - 1] === newLines[j - 1]) dp[i][j] = dp[i - 1][j - 1] + 1;
+    else dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+  }
+  let i = m, j = n;
+  const temp: DiffLine[] = [];
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) { temp.push({ type: 'equal', content: oldLines[i - 1] }); i--; j--; }
+    else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { temp.push({ type: 'added', content: newLines[j - 1] }); j--; }
+    else { temp.push({ type: 'removed', content: oldLines[i - 1] }); i--; }
+  }
+  temp.reverse();
+  return temp;
+}
+
+function buildSideBySide(diffLines: DiffLine[]): { left: DiffLine | null; right: DiffLine | null }[] {
+  const rows: { left: DiffLine | null; right: DiffLine | null }[] = [];
+  let i = 0;
+  while (i < diffLines.length) {
+    const line = diffLines[i];
+    if (line.type === 'equal') { rows.push({ left: line, right: line }); i++; }
+    else if (line.type === 'removed') {
+      const removals: DiffLine[] = [];
+      while (i < diffLines.length && diffLines[i].type === 'removed') { removals.push(diffLines[i]); i++; }
+      const additions: DiffLine[] = [];
+      while (i < diffLines.length && diffLines[i].type === 'added') { additions.push(diffLines[i]); i++; }
+      const maxLen = Math.max(removals.length, additions.length);
+      for (let k = 0; k < maxLen; k++) rows.push({ left: k < removals.length ? removals[k] : null, right: k < additions.length ? additions[k] : null });
+    } else if (line.type === 'added') { rows.push({ left: null, right: line }); i++; }
+    else i++;
+  }
+  return rows;
+}
+
+function PreviewDiffContent({ original, preview }: { original: string; preview: string }) {
+  const diffLines = useMemo(() => computeLineDiff(original, preview), [original, preview]);
+  const rows = useMemo(() => buildSideBySide(diffLines), [diffLines]);
+  const stats = useMemo(() => {
+    let added = 0, removed = 0;
+    for (const line of diffLines) { if (line.type === 'added') added++; if (line.type === 'removed') removed++; }
+    return { added, removed };
+  }, [diffLines]);
+
+  return (
+    <div className="flex-1 overflow-auto bg-study-deep">
+      <div className="grid grid-cols-2 divide-x divide-study-border/40 min-h-full">
+        <div>
+          <div className="px-4 py-2.5 bg-study-surface border-b border-study-border/40 sticky top-0 z-10">
+            <span className="text-xs text-parchment-dim/60 font-medium">当前正文 · <span className="text-green-400/80">+{stats.added}</span> <span className="text-red-400/80">-{stats.removed}</span></span>
+          </div>
+          <div className="px-2">
+            {rows.map((row, idx) => {
+              const line = row.left;
+              if (!line) return <div key={`l-${idx}`} className="flex font-mono text-[13px] leading-7 bg-green-500/5 min-h-[1.75rem]"><span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none" /><span className="flex-1 px-3">&nbsp;</span></div>;
+              return (
+                <div key={`l-${idx}`} className={`flex font-mono text-[13px] leading-7 ${line.type === 'removed' ? 'bg-red-500/10' : 'hover:bg-study-glow/30'}`}>
+                  <span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none">{line.type === 'removed' ? '-' : ''}</span>
+                  <span className={`flex-1 px-3 whitespace-pre-wrap break-words ${line.type === 'removed' ? 'text-red-400/70 line-through decoration-red-400/30' : 'text-parchment-dim/80'}`}>{line.content || ' '}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div>
+          <div className="px-4 py-2.5 bg-study-surface border-b border-study-border/40 sticky top-0 z-10">
+            <span className="text-xs text-parchment-dim/60 font-medium">AI 生成预览</span>
+          </div>
+          <div className="px-2">
+            {rows.map((row, idx) => {
+              const line = row.right;
+              if (!line) return <div key={`r-${idx}`} className="flex font-mono text-[13px] leading-7 bg-red-500/5 min-h-[1.75rem]"><span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none" /><span className="flex-1 px-3">&nbsp;</span></div>;
+              return (
+                <div key={`r-${idx}`} className={`flex font-mono text-[13px] leading-7 ${line.type === 'added' ? 'bg-green-500/10' : 'hover:bg-study-glow/30'}`}>
+                  <span className="w-10 flex-shrink-0 text-right pr-2 text-parchment-dim/15 select-none">{line.type === 'added' ? '+' : ''}</span>
+                  <span className={`flex-1 px-3 whitespace-pre-wrap break-words ${line.type === 'added' ? 'text-green-400/80' : 'text-parchment-dim/80'}`}>{line.content || ' '}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ChapterEditor() {
   const { id: projectId, chapterOutlineId } = useParams<{ id: string; chapterOutlineId: string }>();
   const s = useChapterEditor(chapterOutlineId);
@@ -540,6 +648,28 @@ export default function ChapterEditor() {
             />
           </div>
 
+          {s.shortContentPrompt && (
+            <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg mt-3">
+              <span className="text-xs text-amber-200">
+                生成内容 {s.shortContentPrompt.wordCount} 字，低于目标 {s.shortContentPrompt.target} 字
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { s.handleContinue(); s.setShortContentPrompt(null); }}
+                  className="text-[11px] px-3 py-1 rounded bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 transition-colors"
+                >
+                  续写
+                </button>
+                <button
+                  onClick={() => s.setShortContentPrompt(null)}
+                  className="text-[11px] px-3 py-1 rounded bg-study-deep text-parchment-dim/50 hover:text-parchment-dim/70 transition-colors"
+                >
+                  保持
+                </button>
+              </div>
+            </div>
+          )}
+
           <EditorStatusBar
             saveStatus={s.saveStatus}
             saveRetrying={s.saveRetrying}
@@ -566,15 +696,22 @@ export default function ChapterEditor() {
             onMultiRoundChange={s.setMultiRound}
             autoRevise={s.autoRevise}
             onAutoReviseChange={s.setAutoRevise}
+            previewMode={s.previewMode}
+            onPreviewModeChange={s.setPreviewMode}
             generating={s.generating}
             hasContent={!!(s.content && s.content.length > 50)}
             polishingMode={polishingMode}
             onTogglePolishingMode={() => setPolishingMode((prev) => !prev)}
             brainstorming={s.brainstorming}
             onBrainstorm={() => s.handleBrainstorm()}
+            temperature={s.temperature}
+            onTemperatureChange={s.setTemperature}
+            topP={s.topP}
+            onTopPChange={s.setTopP}
             onGenerate={s.handleGenerate}
             onContinue={s.handleContinue}
             onRefine={s.handleRefine}
+            onStop={s.handleStop}
           />
 
 
@@ -669,6 +806,61 @@ export default function ChapterEditor() {
       </div>
 
       {s.diffData && <VersionDiff v1={s.diffData.v1} v2={s.diffData.v2} onClose={() => s.setDiffData(null)} />}
+
+      {/* Preview comparison panel */}
+      {s.previewContent && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-study-deep">
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-3 border-b border-study-border/50 bg-study-surface">
+            <div className="flex items-center gap-6">
+              <h3 className="font-display text-lg font-bold text-parchment">预览对比</h3>
+              <div className="flex items-center gap-4 text-xs">
+                <span className="flex items-center gap-1.5 text-parchment-dim/70">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-red-400/30 border border-red-400/50" />
+                  当前正文
+                  <span className="font-mono text-parchment-dim/40">({(s.content || '').replace(/[\s\p{P}]/gu, '').length} 字)</span>
+                </span>
+                <svg className="w-4 h-4 text-parchment-dim/25" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                </svg>
+                <span className="flex items-center gap-1.5 text-parchment-dim/70">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-green-400/30 border border-green-400/50" />
+                  AI 生成预览
+                  <span className="font-mono text-parchment-dim/40">({s.previewContent.replace(/[\s\p{P}]/gu, '').length} 字)</span>
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={s.handleAdoptPreview}
+                className="btn-primary text-xs flex items-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                </svg>
+                采纳预览
+              </button>
+              <button
+                onClick={s.handleDiscardPreview}
+                className="btn-secondary text-xs flex items-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                丢弃
+              </button>
+            </div>
+          </div>
+
+          {/* Diff content */}
+          <PreviewDiffContent original={s.content || ''} preview={s.previewContent} />
+
+          {/* Footer hint */}
+          <div className="px-6 py-2.5 border-t border-study-border/30 bg-study-surface text-center">
+            <span className="text-[11px] text-parchment-dim/35">采纳将替换当前正文为 AI 生成版本 · 丢弃将删除此预览</span>
+          </div>
+        </div>
+      )}
 
       {s.showCostConfirm && s.costEstimate && (
         <CostConfirmModal costEstimate={s.costEstimate} onConfirm={s.doGenerate} onCancel={() => s.setShowCostConfirm(false)} />

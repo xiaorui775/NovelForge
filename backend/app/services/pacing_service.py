@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 import uuid
 
 from sqlalchemy import select
@@ -11,6 +10,7 @@ from app.models.chapter import Chapter
 from app.models.model_config import ModelConfig
 from app.models.outline import ChapterOutline, Outline
 from app.models.project import Project
+from app.utils.json_extract import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -96,19 +96,7 @@ class PacingService:
 
         try:
             result = await adapter.generate(messages, max_tokens=1000)
-            raw = result["content"].strip()
-
-            # 提取 JSON
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            # 尝试用正则提取 JSON 数组
-            match = re.search(r'\[.*\]', raw, re.DOTALL)
-            if match:
-                raw = match.group(0)
-
-            data = json.loads(raw)
+            data = extract_json(result["content"])
 
             # 标准化结果
             normalized = []

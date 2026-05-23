@@ -192,7 +192,7 @@ class OutlineService:
     async def expand_detail_outline(
         self, chapter_outline_id: uuid.UUID, model_id: uuid.UUID
     ) -> dict:
-        """AI 生成章节细纲"""
+        """AI 生成章节细纲（注入项目上下文以确保与设定一致）"""
         chapter_outline = await self._get_chapter_outline_orm(chapter_outline_id)
         if not chapter_outline:
             raise ValueError("章节概述不存在")
@@ -213,12 +213,98 @@ class OutlineService:
         adapter = await self._get_model_adapter(model_id)
 
         genre = project.genre if project else ""
+
+        # 注入角色、世界观、术语等上下文
+        context_parts = []
+        if project and project.worldview_id:
+            from app.models.worldview import Worldview
+            from sqlalchemy.orm import selectinload
+            wv_result = await self.db.execute(
+                select(Worldview)
+                .where(Worldview.id == project.worldview_id)
+                .options(selectinload(Worldview.characters))
+            )
+            wv = wv_result.scalar_one_or_none()
+            if wv:
+                if wv.name or wv.description:
+                    context_parts.append(f"世界观：{wv.name or ''}\n{wv.description[:300] or ''}")
+                if wv.rules:
+                    context_parts.append(f"世界规则：{wv.rules[:200]}")
+                if wv.characters:
+                    char_lines = []
+                    for c in list(wv.characters)[:8]:
+                        line = f"- {c.name}"
+                        if c.role_type:
+                            line += f"（{c.role_type}）"
+                        if c.description:
+                            line += f"：{c.description[:80]}"
+                        char_lines.append(line)
+                    context_parts.append("主要角色：\n" + "\n".join(char_lines))
+
+        if project:
+            from app.models.terminology import Terminology
+            terms_result = await self.db.execute(
+                select(Terminology).where(Terminology.project_id == project.id).limit(15)
+            )
+            terms = list(terms_result.scalars().all())
+            if terms:
+                term_lines = [f"- {t.term}: {t.description or ''}" for t in terms]
+                context_parts.append("术语表：\n" + "\n".join(term_lines))
+
+        # 注入大纲整体 synopsis，让细纲了解全书叙事弧线
+        if outline and outline.synopsis:
+            context_parts.append(f"全书梗概：{outline.synopsis[:500]}")
+
+        # 注入前章摘要（最近 2 章），确保细纲与前文连贯
+        if chapter_outline.chapter_number > 1:
+            from app.models.chapter import Chapter
+            from app.models.chapter_summary import ChapterSummary
+            prev_result = await self.db.execute(
+                select(ChapterOutline, Chapter.content_summary, ChapterSummary)
+                .outerjoin(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
+                .outerjoin(ChapterSummary, ChapterSummary.chapter_id == Chapter.id)
+                .where(
+                    ChapterOutline.outline_id == outline.id,
+                    ChapterOutline.chapter_number < chapter_outline.chapter_number,
+                )
+                .order_by(ChapterOutline.chapter_number.desc())
+                .limit(2)
+            )
+            prev_rows = list(prev_result.all())
+            if prev_rows:
+                prev_lines = []
+                for co, cs_text, cs in reversed(prev_rows):
+                    summary = cs_text or (cs.events if cs else None) or co.summary or ""
+                    if summary:
+                        prev_lines.append(f"第{co.chapter_number}章 {co.title or ''}: {summary[:200]}")
+                if prev_lines:
+                    context_parts.append("前章摘要：\n" + "\n".join(prev_lines))
+
+        # 注入活跃伏笔（未回收的伏笔应在后续章节推进或回收）
+        from app.models.foreshadowing import Foreshadowing
+        foreshadow_result = await self.db.execute(
+            select(Foreshadowing)
+            .where(
+                Foreshadowing.project_id == project.id,
+                Foreshadowing.status.in_(["planted", "hinted"]),
+            )
+            .limit(10)
+        )
+        foreshadows = list(foreshadow_result.scalars().all())
+        if foreshadows:
+            fs_lines = [f"- {f.description[:100]}" for f in foreshadows]
+            context_parts.append("未回收的伏笔（考虑在本章推进或回收）：\n" + "\n".join(fs_lines))
+
+        context_block = "\n\n".join(context_parts)
+
         prompt = f"""你是一位资深小说策划编辑。请根据以下章节概述，生成一份详细的章节细纲。
 
 {"小说类型：" + genre if genre else ""}
 章节编号：第{chapter_outline.chapter_number}章
 章节标题：{chapter_outline.title or '未定'}
-章节概述：{chapter_outline.summary}
+章节概述：{chapter_outline.summary[:800]}
+
+{context_block}
 
 请生成详细的章节细纲，包括：
 1. 场景设定（时间、地点、氛围）
@@ -227,6 +313,8 @@ class OutlineService:
 4. 对话要点（关键对话的方向）
 5. 情感节奏（起伏变化）
 6. 伏笔或悬念（如有）
+
+注意：角色设定和术语必须与上述参考信息一致，不要使用不存在的角色或矛盾的设定。
 
 请直接输出细纲内容，不要包含标题。"""
 
@@ -240,9 +328,10 @@ class OutlineService:
         return await self.get_chapter_outline(chapter_outline_id)
 
     async def generate_full_outline(
-        self, project_id: uuid.UUID, model_id: uuid.UUID, synopsis: str = "", force: bool = False
+        self, project_id: uuid.UUID, model_id: uuid.UUID, synopsis: str = "",
+        force: bool = False, total_chapters: int = 20, pacing_style: str = "",
     ) -> Outline:
-        """AI 生成全书大纲"""
+        """AI 生成全书大纲（注入角色、世界观、术语上下文）"""
         project_result = await self.db.execute(
             select(Project).where(Project.id == project_id)
         )
@@ -256,13 +345,66 @@ class OutlineService:
         description = project.description or ""
         context = synopsis or description
 
+        # 注入项目上下文：角色、世界观、术语
+        context_parts = []
+        if project.worldview_id:
+            from app.models.worldview import Worldview
+            from sqlalchemy.orm import selectinload
+            wv_result = await self.db.execute(
+                select(Worldview)
+                .where(Worldview.id == project.worldview_id)
+                .options(selectinload(Worldview.characters))
+            )
+            wv = wv_result.scalar_one_or_none()
+            if wv:
+                if wv.name or wv.description:
+                    context_parts.append(f"世界观：{wv.name or ''}\n{wv.description[:300] or ''}")
+                if wv.rules:
+                    context_parts.append(f"世界规则：{wv.rules[:200]}")
+                if wv.characters:
+                    char_lines = []
+                    for c in list(wv.characters)[:8]:
+                        line = f"- {c.name}"
+                        if c.role_type:
+                            line += f"（{c.role_type}）"
+                        if c.description:
+                            line += f"：{c.description[:80]}"
+                        char_lines.append(line)
+                    context_parts.append("主要角色：\n" + "\n".join(char_lines))
+
+        if project:
+            from app.models.terminology import Terminology
+            terms_result = await self.db.execute(
+                select(Terminology).where(Terminology.project_id == project.id).limit(15)
+            )
+            terms = list(terms_result.scalars().all())
+            if terms:
+                term_lines = [f"- {t.term}: {t.description or ''}" for t in terms]
+                context_parts.append("术语表：\n" + "\n".join(term_lines))
+
+        context_block = "\n\n".join(context_parts)
+
+        pacing_hint = ""
+        if pacing_style == "fast":
+            pacing_hint = "节奏要求：快节奏，每章都有强冲突或转折，适合爽文/悬疑。"
+        elif pacing_style == "slow":
+            pacing_hint = "节奏要求：慢节奏，注重氛围和人物内心，适合文学/言情。"
+        elif pacing_style == "balanced":
+            pacing_hint = "节奏要求：张弛有度，紧张与舒缓交替。"
+
         prompt = f"""你是一位资深小说策划编辑。请为以下小说生成一份完整的章节大纲。
 
 {"小说类型：" + genre if genre else ""}
 {"小说简介：" + context if context else ""}
 小说名称：{project.name}
+目标章节数：{total_chapters} 章
+{pacing_hint}
 
-请生成一份包含 20 个章节的大纲，每个章节包含：
+{context_block}
+
+注意：角色设定和术语必须与上述参考信息一致，不要使用不存在的角色或矛盾的设定。
+
+请生成一份包含 {total_chapters} 个章节的大纲，每个章节包含：
 - 章节编号
 - 章节标题（简短有力）
 - 章节概述（2-3句话描述本章主要内容）
@@ -279,36 +421,10 @@ class OutlineService:
         result = await adapter.generate(messages)
         content = result.get("content", "")
 
-        # Parse JSON from response - try multiple extraction strategies
-        import json
-        import re
-        chapters_data = None
+        from app.utils.json_extract import extract_json
+        chapters_data = extract_json(content)
 
-        # Strategy 1: Extract from markdown code block
-        code_block_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', content)
-        if code_block_match:
-            try:
-                chapters_data = json.loads(code_block_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Strategy 2: Find the outermost JSON array
-        if chapters_data is None:
-            array_match = re.search(r'\[[\s\S]*\]', content)
-            if array_match:
-                try:
-                    chapters_data = json.loads(array_match.group(0))
-                except json.JSONDecodeError:
-                    pass
-
-        # Strategy 3: Try parsing the whole content
-        if chapters_data is None:
-            try:
-                chapters_data = json.loads(content)
-            except json.JSONDecodeError:
-                pass
-
-        if chapters_data is None or not isinstance(chapters_data, list):
+        if not isinstance(chapters_data, list):
             raise ValueError(f"AI 返回的内容无法解析为章节列表。原始内容：{content[:200]}...")
 
         # Create or update outline

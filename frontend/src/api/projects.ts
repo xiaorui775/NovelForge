@@ -9,6 +9,8 @@ export interface Project {
   target_words_per_chapter_min: number;
   target_words_per_chapter_max: number;
   worldview_id: string | null;
+  series_id: string | null;
+  sort_order_in_series: number;
   cover_image: string | null;
   status: string;
   style_reference: string | null;
@@ -100,4 +102,14 @@ export const projectsApi = {
   permanentDelete: (id: string) => client.delete(`/projects/${id}/permanent`),
 
   cleanupTrash: (days = 30) => client.post<{ deleted_count: number }>(`/projects/trash/cleanup?days=${days}`),
+
+  importTxt: (projectId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return client.post<{ imported: number; chapters: Array<{ chapter_outline_id: string; chapter_number: number; title: string; word_count: number }> }>(
+      `/projects/${projectId}/import-txt`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    );
+  },
 };

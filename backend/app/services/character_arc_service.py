@@ -119,3 +119,69 @@ class CharacterArcService:
             })
 
         return list(chapters.values())
+
+    async def get_absence_report(self, outline_id: uuid.UUID) -> list[dict]:
+        """报告每个角色连续 N 章未出场"""
+        # 获取大纲下所有章节号
+        co_result = await self.db.execute(
+            select(ChapterOutline.chapter_number)
+            .where(ChapterOutline.outline_id == outline_id)
+            .order_by(ChapterOutline.chapter_number)
+        )
+        all_chapter_numbers = [row[0] for row in co_result.all()]
+        if not all_chapter_numbers:
+            return []
+        max_chapter = max(all_chapter_numbers)
+
+        # 获取大纲关联的所有角色
+        from app.models.worldview import worldview_characters, Worldview
+        from app.models.outline import Outline
+        ol_result = await self.db.execute(select(Outline).where(Outline.id == outline_id))
+        outline = ol_result.scalar_one_or_none()
+        if not outline or not outline.project_id:
+            return []
+
+        from app.models.project import Project
+        proj_result = await self.db.execute(select(Project).where(Project.id == outline.project_id))
+        project = proj_result.scalar_one_or_none()
+        if not project or not project.worldview_id:
+            return []
+
+        char_result = await self.db.execute(
+            select(Character)
+            .join(worldview_characters, worldview_characters.c.character_id == Character.id)
+            .where(worldview_characters.c.worldview_id == project.worldview_id)
+        )
+        characters = list(char_result.scalars().all())
+
+        # 获取所有出场记录
+        app_result = await self.db.execute(
+            select(CharacterAppearance.character_id, ChapterOutline.chapter_number)
+            .join(ChapterOutline, CharacterAppearance.chapter_outline_id == ChapterOutline.id)
+            .where(ChapterOutline.outline_id == outline_id)
+        )
+        char_last_chapter: dict[uuid.UUID, int] = {}
+        for char_id, ch_num in app_result.all():
+            if ch_num > char_last_chapter.get(char_id, 0):
+                char_last_chapter[char_id] = ch_num
+
+        report = []
+        for char in characters:
+            last = char_last_chapter.get(char.id, 0)
+            absent = max_chapter - last
+            if absent > 0 and last > 0:
+                report.append({
+                    "character_id": str(char.id),
+                    "name": char.name,
+                    "last_chapter": last,
+                    "absent_chapters": absent,
+                })
+            elif last == 0:
+                report.append({
+                    "character_id": str(char.id),
+                    "name": char.name,
+                    "last_chapter": 0,
+                    "absent_chapters": max_chapter,
+                })
+        report.sort(key=lambda x: x["absent_chapters"], reverse=True)
+        return report
