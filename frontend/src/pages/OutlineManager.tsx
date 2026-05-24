@@ -270,7 +270,7 @@ export default function OutlineManager() {
         <div className="flex items-center justify-between mb-4">
           <div className="section-title">全书大纲</div>
           {outline && (
-            <button className="btn-ghost text-xs" onClick={() => setShowCreateOutline(true)}>
+            <button className="btn-ghost text-xs whitespace-nowrap" onClick={() => setShowCreateOutline(true)}>
               编辑
             </button>
           )}
@@ -553,15 +553,15 @@ export default function OutlineManager() {
                       </div>
                     )}
                   </div>
-                  <div className="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
                     <Link
                       to={`/projects/${projectId}/chapters/${chapter.id}`}
-                      className="btn-ghost text-xs"
+                      className="btn-ghost text-xs whitespace-nowrap"
                     >
                       写章节
                     </Link>
                     <button
-                      onClick={() => { setSplitTarget(chapter.id); setSplitPosition(1); }}
+                      onClick={(e) => { e.stopPropagation(); setSplitTarget(chapter.id); setSplitPosition(1); }}
                       className="p-1.5 text-parchment-dim/30 hover:text-ink transition-colors rounded-md hover:bg-study-glow"
                       title="拆分章节"
                     >
@@ -597,23 +597,25 @@ export default function OutlineManager() {
       )}
       {/* Split chapter modal */}
       {splitTarget && (
-        <div className="card border border-ink/20 animate-slide-up">
-          <h3 className="font-display text-lg font-semibold text-parchment mb-3">拆分章节</h3>
-          <p className="text-sm text-parchment-dim/60 mb-3">在第几段之后拆分？前半段留在当前章节，后半段成为新章节。</p>
-          <div className="flex items-center gap-3 mb-4">
-            <label className="text-sm text-parchment-dim/70">拆分位置</label>
-            <input
-              type="number"
-              className="input w-24 text-sm py-2"
-              min={1}
-              value={splitPosition}
-              onChange={(e) => setSplitPosition(parseInt(e.target.value) || 1)}
-            />
-            <span className="text-xs text-parchment-dim/40">段之后</span>
-          </div>
-          <div className="flex gap-3">
-            <button onClick={() => handleSplitChapter(splitTarget)} className="btn-primary text-sm">确认拆分</button>
-            <button onClick={() => setSplitTarget(null)} className="btn-ghost text-sm">取消</button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setSplitTarget(null)}>
+          <div className="card border border-ink/20 w-96" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-display text-lg font-semibold text-parchment mb-3">拆分章节</h3>
+            <p className="text-sm text-parchment-dim/60 mb-3">在第几段之后拆分？前半段留在当前章节，后半段成为新章节。</p>
+            <div className="flex items-center gap-3 mb-4">
+              <label className="text-sm text-parchment-dim/70">拆分位置</label>
+              <input
+                type="number"
+                className="input w-24 text-sm py-2"
+                min={1}
+                value={splitPosition}
+                onChange={(e) => setSplitPosition(parseInt(e.target.value) || 1)}
+              />
+              <span className="text-xs text-parchment-dim/40">段之后</span>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => handleSplitChapter(splitTarget)} className="btn-primary text-sm">确认拆分</button>
+              <button onClick={() => setSplitTarget(null)} className="btn-ghost text-sm">取消</button>
+            </div>
           </div>
         </div>
       )}

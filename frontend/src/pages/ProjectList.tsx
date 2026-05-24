@@ -128,89 +128,87 @@ export default function ProjectList() {
       ) : (
         <div className="space-y-3">
           {filteredProjects.map((project) => (
-            <div key={project.id} className="card-hover group stagger-item">
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Link
-                      to={`/projects/${project.id}`}
-                      className="font-display font-semibold text-parchment hover:text-ink transition-colors truncate"
-                    >
-                      {project.name}
-                    </Link>
-                    {project.status === 'draft' && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-ink/10 text-ink">草稿</span>
-                    )}
-                  </div>
-                  {project.description && (
-                    <p className="text-xs text-parchment-dim/50 line-clamp-2 mb-2">{project.description}</p>
-                  )}
-                  <div className="flex items-center gap-3 text-[11px] text-parchment-dim/40">
-                    {project.target_words_per_chapter_min && (
-                      <span>目标 {project.target_words_per_chapter_min}-{project.target_words_per_chapter_max} 字/章</span>
-                    )}
-                    <span>{new Date(project.updated_at).toLocaleDateString('zh-CN')}</span>
-                  </div>
-                  {project.tags && project.tags.length > 0 && (
-                    <div className="flex gap-1.5 mt-2">
-                      {project.tags.map((tag) => (
-                        <span key={tag} className="text-[10px] px-2 py-0.5 rounded-full bg-study-surface text-parchment-dim/50">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                  {showTrash ? (
-                    <>
-                      <button onClick={() => restoreProject(project.id)} className="btn-ghost-xs" title="恢复">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
-                        </svg>
-                      </button>
-                      <button onClick={() => handlePermanentDelete(project.id, project.name)} className="btn-ghost-xs text-red-400" title="永久删除">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                        </svg>
-                      </button>
-                    </>
-                  ) : showArchived ? (
-                    <>
-                      <button onClick={() => unarchiveProject(project.id)} className="btn-ghost-xs" title="取消归档">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
-                        </svg>
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <Link to={`/projects/${project.id}`} className="btn-ghost-xs" title="详情">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                      </Link>
-                      <Link to={`/projects/${project.id}/edit`} className="btn-ghost-xs" title="编辑">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-                        </svg>
-                      </Link>
-                      <button onClick={() => archiveProject(project.id)} className="btn-ghost-xs" title="归档">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-                        </svg>
-                      </button>
-                      <button onClick={() => handleDelete(project.id, project.name)} className="btn-ghost-xs text-red-400" title="删除">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                        </svg>
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
+	            <div key={project.id} className="stagger-item flex items-start justify-between p-4 bg-study-card rounded-lg border border-study-border hover:border-ink/20 transition-all duration-200 group">
+	              <div className="flex-1 min-w-0">
+	                <div className="flex items-center gap-2 mb-1">
+	                  <Link
+	                    to={`/projects/${project.id}`}
+	                    className="font-display font-semibold text-parchment hover:text-ink transition-colors truncate"
+	                  >
+	                    {project.name}
+	                  </Link>
+	                  {project.status === 'draft' && (
+	                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-ink/10 text-ink">草稿</span>
+	                  )}
+	                </div>
+	                {project.description && (
+	                  <p className="text-xs text-parchment-dim/50 line-clamp-2 mb-2">{project.description}</p>
+	                )}
+	                <div className="flex items-center gap-3 text-[11px] text-parchment-dim/40">
+	                  {project.target_words_per_chapter_min && (
+	                    <span>目标 {project.target_words_per_chapter_min}-{project.target_words_per_chapter_max} 字/章</span>
+	                  )}
+	                  <span>{new Date(project.updated_at).toLocaleDateString('zh-CN')}</span>
+	                </div>
+	                {project.tags && project.tags.length > 0 && (
+	                  <div className="flex gap-1.5 mt-2">
+	                    {project.tags.map((tag) => (
+	                      <span key={tag} className="text-[10px] px-2 py-0.5 rounded-full bg-study-surface text-parchment-dim/50">
+	                        {tag}
+	                      </span>
+	                    ))}
+	                  </div>
+	                )}
+	              </div>
+	              <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-4">
+	                {showTrash ? (
+	                  <>
+	                    <button onClick={() => restoreProject(project.id)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all" title="恢复">
+	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+	                      </svg>
+	                    </button>
+	                    <button onClick={() => handlePermanentDelete(project.id, project.name)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-red-400 hover:bg-red-500/10 transition-all" title="永久删除">
+	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+	                      </svg>
+	                    </button>
+	                  </>
+	                ) : showArchived ? (
+	                  <>
+	                    <button onClick={() => unarchiveProject(project.id)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all" title="取消归档">
+	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+	                      </svg>
+	                    </button>
+	                  </>
+	                ) : (
+	                  <>
+	                    <Link to={`/projects/${project.id}`} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-ink hover:bg-ink/10 transition-all" title="详情">
+	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+	                      </svg>
+	                    </Link>
+	                    <Link to={`/projects/${project.id}/edit`} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-ink hover:bg-ink/10 transition-all" title="编辑">
+	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+	                      </svg>
+	                    </Link>
+	                    <button onClick={() => archiveProject(project.id)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-amber-400 hover:bg-amber-500/10 transition-all" title="归档">
+	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+	                      </svg>
+	                    </button>
+	                    <button onClick={() => handleDelete(project.id, project.name)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-red-400 hover:bg-red-500/10 transition-all" title="删除">
+	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+	                        <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+	                      </svg>
+	                    </button>
+	                  </>
+	                )}
+	              </div>
+	            </div>
           ))}
         </div>
       )}

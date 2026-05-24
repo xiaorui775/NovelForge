@@ -113,17 +113,23 @@ class SelectionRewriteRequest(BaseModel):
     instruction: str = Field(..., min_length=1, max_length=500)
     context_before: str = ""
     context_after: str = ""
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class ChapterRefineRequest(BaseModel):
     model_id: uuid.UUID
     draft_text: str = Field(..., min_length=50, max_length=120000)
     max_suggestions: int = Field(default=10, ge=1, le=20)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class ChapterBrainstormRequest(BaseModel):
     model_id: uuid.UUID
     selected_direction: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class BrainstormDirection(BaseModel):

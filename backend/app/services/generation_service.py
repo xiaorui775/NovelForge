@@ -1024,6 +1024,8 @@ class GenerationService:
         max_tokens: Optional[int] = None,
         auto_revise: bool = False,
         adapter=None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ) -> AsyncGenerator[str, None]:
         """续写章节内容，基于已有内容继续生成"""
         # 加载实体链
@@ -1139,7 +1141,7 @@ class GenerationService:
         start_time = time.time()
         content_parts = []
         try:
-            async for token in adapter.generate_stream(messages, max_tokens=max_tokens):
+            async for token in adapter.generate_stream(messages, max_tokens=max_tokens, temperature=temperature, top_p=top_p):
                 content_parts.append(token)
                 yield json.dumps({"type": "token", "content": token}, ensure_ascii=False)
 
@@ -1580,6 +1582,8 @@ class GenerationService:
         model_id: uuid.UUID,
         draft_text: str,
         max_suggestions: int = 10,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ) -> AsyncGenerator[str, None]:
         """对粗稿给出逐段精修建议（SSE）"""
         try:
@@ -1634,7 +1638,7 @@ class GenerationService:
             revised_text = ""
             try:
                 parts = []
-                async for token in adapter.generate_stream(messages, max_tokens=800):
+                async for token in adapter.generate_stream(messages, max_tokens=800, temperature=temperature, top_p=top_p):
                     parts.append(token)
                 raw = "".join(parts).strip()
                 parsed = extract_json(raw)
@@ -1668,6 +1672,8 @@ class GenerationService:
         max_tokens: Optional[int] = None,
         template_id: Optional[uuid.UUID] = None,
         adapter=None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ) -> AsyncGenerator[str, None]:
         """多轮生成：初稿 → 审校 → 定稿"""
         # 加载实体链
@@ -1803,7 +1809,7 @@ class GenerationService:
             # 流式生成当前轮次
             round_content_parts = []
             try:
-                async for token in adapter.generate_stream(messages, max_tokens=max_tokens):
+                async for token in adapter.generate_stream(messages, max_tokens=max_tokens, temperature=temperature, top_p=top_p):
                     round_content_parts.append(token)
                     yield json.dumps({
                         "type": "round_token",
@@ -1984,6 +1990,8 @@ class GenerationService:
         model_id: uuid.UUID,
         context_before: str = "",
         context_after: str = "",
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ) -> AsyncGenerator[str, None]:
         """改写选中的文本片段，SSE 流式输出"""
         # 加载实体链
@@ -2042,7 +2050,7 @@ class GenerationService:
         token_count = 0
 
         try:
-            async for token in adapter.generate_stream(messages, max_tokens=2000):
+            async for token in adapter.generate_stream(messages, max_tokens=2000, temperature=temperature, top_p=top_p):
                 full_content += token
                 token_count += 1
                 yield json.dumps({"type": "token", "content": token}, ensure_ascii=False)
@@ -2062,6 +2070,8 @@ class GenerationService:
         chapter_id: uuid.UUID,
         model_id: uuid.UUID,
         selected_direction: Optional[str] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ) -> AsyncGenerator[str, None]:
         chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
         chapter = chain["chapter"]
@@ -2108,7 +2118,7 @@ class GenerationService:
             },
         ]
 
-        brainstorm_result = await adapter.generate(brainstorm_messages, max_tokens=1200)
+        brainstorm_result = await adapter.generate(brainstorm_messages, max_tokens=1200, temperature=temperature, top_p=top_p)
         brainstorm_raw = (brainstorm_result.get("content") or "").strip()
 
         directions: list[dict] = []
@@ -2166,7 +2176,7 @@ class GenerationService:
             ]
 
             parts = []
-            async for token in adapter.generate_stream(transition_messages, max_tokens=500):
+            async for token in adapter.generate_stream(transition_messages, max_tokens=500, temperature=temperature, top_p=top_p):
                 parts.append(token)
                 yield json.dumps({"type": "brainstorm_transition_token", "content": token}, ensure_ascii=False)
             transition_text = "".join(parts).strip()[:600]

@@ -126,7 +126,7 @@ class ConsistencyService:
 
             # 重新查询以获取最新摘要
             prev_result = await self.db.execute(
-                select(ChapterOutline, Chapter.content_summary, ChapterSummary.character_states, ChapterSummary.events)
+                select(ChapterOutline, Chapter, ChapterSummary)
                 .outerjoin(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
                 .outerjoin(ChapterSummary, ChapterSummary.chapter_id == Chapter.id)
                 .where(
@@ -136,15 +136,10 @@ class ConsistencyService:
                 .order_by(ChapterOutline.chapter_number.desc())
                 .limit(3)
             )
+            from app.services.common import format_chapter_card
             lines = []
-            for co, content_summary, char_states, events in reversed(prev_result.all()):
-                parts = [f"第{co.chapter_number}章: {content_summary or co.summary}"]
-                if char_states:
-                    parts.append(f"角色状态: {char_states}")
-                if events:
-                    parts.append(f"事件: {events}")
-                if any([content_summary or co.summary, char_states, events]):
-                    lines.append(" | ".join(p for p in parts if p))
+            for co, ch, cs in reversed(prev_result.all()):
+                lines.append(format_chapter_card(co, cs, ch.content_summary if ch else None))
             prev_summaries = "\n".join(lines)
 
         return {

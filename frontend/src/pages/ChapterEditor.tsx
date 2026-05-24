@@ -538,6 +538,8 @@ export default function ChapterEditor() {
               modelId={s.selectedModel}
               onApplyRewrite={s.handleApplyRewrite}
               validationIssues={s.validationIssues}
+              temperature={s.temperature ?? undefined}
+              topP={s.topP ?? undefined}
             />
           </div>
         </div>
@@ -645,6 +647,8 @@ export default function ChapterEditor() {
               modelId={s.selectedModel}
               onApplyRewrite={s.handleApplyRewrite}
               validationIssues={s.validationIssues}
+              temperature={s.temperature ?? undefined}
+              topP={s.topP ?? undefined}
             />
           </div>
 

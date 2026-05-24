@@ -1,4 +1,4 @@
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.project import Project
@@ -12,7 +12,7 @@ async def search_all(db: AsyncSession, query: str, limit: int = 5) -> dict:
     """Full-text search across projects, chapters, characters, and terminology."""
     pattern = f"%{query}%"
 
-    # Projects
+    # Projects (短文本，ILIKE 够用)
     result = await db.execute(
         select(Project)
         .where(or_(Project.name.ilike(pattern), Project.description.ilike(pattern)))
@@ -23,13 +23,15 @@ async def search_all(db: AsyncSession, query: str, limit: int = 5) -> dict:
         for p in result.scalars().all()
     ]
 
-    # Chapters (search in content)
+    # Chapters (大文本，用 pg_trgm 的 % 运算符 + similarity 排序)
+    chapter_limit = min(limit, 20)
     result = await db.execute(
         select(Chapter, ChapterOutline, Outline)
         .join(ChapterOutline, Chapter.chapter_outline_id == ChapterOutline.id)
         .join(Outline, ChapterOutline.outline_id == Outline.id)
-        .where(Chapter.content.ilike(pattern))
-        .limit(limit)
+        .where(Chapter.content.op('%')(query))
+        .order_by(func.similarity(Chapter.content, query).desc())
+        .limit(chapter_limit)
     )
     chapters = []
     for ch, co, outline in result.all():
@@ -49,10 +51,11 @@ async def search_all(db: AsyncSession, query: str, limit: int = 5) -> dict:
             "id": str(co.id),
             "project_id": str(outline.project_id),
             "snippet": snippet,
+            "similarity": None,
             "type": "chapter",
         })
 
-    # Characters
+    # Characters (短文本，ILIKE 够用)
     result = await db.execute(
         select(Character)
         .where(or_(Character.name.ilike(pattern), Character.description.ilike(pattern)))
@@ -63,7 +66,7 @@ async def search_all(db: AsyncSession, query: str, limit: int = 5) -> dict:
         for c in result.scalars().all()
     ]
 
-    # Terminology
+    # Terminology (短文本，ILIKE 够用)
     result = await db.execute(
         select(Terminology)
         .where(or_(Terminology.term.ilike(pattern), Terminology.description.ilike(pattern)))

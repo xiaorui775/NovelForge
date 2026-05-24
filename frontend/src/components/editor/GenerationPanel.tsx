@@ -14,11 +14,13 @@ interface GenerationPanelProps {
   modelId?: string;
   onApplyRewrite?: (start: number, end: number, newText: string) => void;
   validationIssues?: ValidationIssue[];
+  temperature?: number;
+  topP?: number;
 }
 
 export default function GenerationPanel({
   generating, currentRound, streamingContent, content, editorRef, onContentChange, onStop,
-  chapterId, modelId, onApplyRewrite, validationIssues = [],
+  chapterId, modelId, onApplyRewrite, validationIssues = [], temperature, topP,
 }: GenerationPanelProps) {
   const [showValidation, setShowValidation] = useState(true);
   if (generating) {
@@ -76,6 +78,8 @@ export default function GenerationPanel({
           content={content}
           onApplyRewrite={onApplyRewrite}
           generating={generating}
+          temperature={temperature}
+          topP={topP}
         />
       )}
       {validationIssues.length > 0 && (

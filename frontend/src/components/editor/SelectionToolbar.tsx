@@ -9,6 +9,8 @@ interface SelectionToolbarProps {
   content: string;
   onApplyRewrite: (start: number, end: number, newText: string) => void;
   generating: boolean;
+  temperature?: number;
+  topP?: number;
 }
 
 const PRESET_INSTRUCTIONS = [
@@ -27,6 +29,8 @@ export default function SelectionToolbar({
   content,
   onApplyRewrite,
   generating,
+  temperature,
+  topP,
 }: SelectionToolbarProps) {
   const navigate = useNavigate();
   const { id: projectId } = useParams<{ id: string }>();
@@ -113,6 +117,8 @@ export default function SelectionToolbar({
         instruction,
         context_before: contextBefore,
         context_after: contextAfter,
+        temperature: temperature ?? undefined,
+        top_p: topP ?? undefined,
       },
       (event: SSEEvent) => {
         if (event.type === 'token' && event.content) {

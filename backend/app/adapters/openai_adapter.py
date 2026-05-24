@@ -57,17 +57,25 @@ class OpenAIAdapter(BaseModelAdapter):
     )
     async def generate(self, messages: list[dict], **kwargs) -> dict:
         max_tokens = kwargs.get("max_tokens", self.max_tokens)
+        temperature = kwargs.get("temperature")
+        top_p = kwargs.get("top_p")
+
+        body = {
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        if temperature is not None:
+            body["temperature"] = temperature
+        if top_p is not None:
+            body["top_p"] = top_p
 
         client = self._get_client()
         response = await client.post(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
-            json={
-                "model": self.model_name,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "stream": False,
-            },
+            json=body,
         )
 
         # Only retry on 429 and 5xx, raise for other errors

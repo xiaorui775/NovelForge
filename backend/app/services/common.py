@@ -1,5 +1,6 @@
 """公共实体链加载工具，消除各 service 中重复的 chapter -> chapter_outline -> outline -> project 查询链"""
 
+import json
 import uuid
 from typing import Optional
 
@@ -10,6 +11,71 @@ from app.models.chapter import Chapter
 from app.models.model_config import ModelConfig
 from app.models.outline import ChapterOutline, Outline
 from app.models.project import Project
+
+
+def format_chapter_card(
+    chapter_outline: ChapterOutline,
+    chapter_summary=None,
+    content_summary: Optional[str] = None,
+) -> str:
+    """将章节摘要格式化为紧凑的结构化卡片，用于 prompt 注入。
+
+    优先使用 ChapterSummary 结构化字段（~80 字/章），否则回退到自由文本摘要。
+    """
+    if chapter_summary is None:
+        fallback = content_summary or chapter_outline.summary or ""
+        return f"- 第{chapter_outline.chapter_number}章 {chapter_outline.title or ''}: {fallback}"
+
+    parts = [f"- 第{chapter_outline.chapter_number}章 {chapter_outline.title or ''}"]
+
+    # timeline + locations → 行内标注
+    timeline = _safe_str_field(chapter_summary, "timeline")
+    locations = _safe_json_field(chapter_summary, "locations")
+    meta = []
+    if timeline:
+        meta.append(timeline)
+    if locations and isinstance(locations, list):
+        meta.append("→".join(str(l) for l in locations[:3]))
+    if meta:
+        parts.append(" | ".join(meta))
+
+    # character_states → 紧凑键值对
+    char_states = _safe_json_field(chapter_summary, "character_states")
+    if char_states and isinstance(char_states, dict):
+        entries = []
+        for name, state in list(char_states.items())[:5]:
+            if isinstance(state, dict):
+                s = "/".join(str(v) for v in state.values() if v)
+                entries.append(f"{name}: {s}" if s else name)
+            else:
+                entries.append(f"{name}: {state}")
+        if entries:
+            parts.append("角色: {" + ", ".join(entries) + "}")
+
+    # unresolved_hooks → 简表
+    hooks = _safe_json_field(chapter_summary, "unresolved_hooks")
+    if hooks and isinstance(hooks, list):
+        hook_strs = [str(h)[:30] for h in hooks[:4]]
+        parts.append("悬念: [" + ", ".join(hook_strs) + "]")
+
+    return "\n  ".join(parts)
+
+
+def _safe_json_field(obj, field_name: str):
+    """安全解析 ChapterSummary 上的 JSON Text 字段"""
+    raw = getattr(obj, field_name, None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _safe_str_field(obj, field_name: str) -> Optional[str]:
+    """安全获取 ChapterSummary 上的字符串字段"""
+    val = getattr(obj, field_name, None)
+    return val if val else None
 
 
 async def load_chapter_chain(

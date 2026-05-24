@@ -331,7 +331,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
 
     abortRef.current = chaptersApi.continueWriting(
       chapter.id,
-      { model_id: selectedModel },
+      { model_id: selectedModel, temperature: temperature ?? undefined, top_p: topP ?? undefined },
       (event: SSEEvent) => {
         if (event.type === 'token' && event.content) {
           streamingContentRef.current += event.content;
@@ -373,7 +373,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
 
     abortRef.current = chaptersApi.refine(
       chapter.id,
-      { model_id: selectedModel, draft_text: content, max_suggestions: 10 },
+      { model_id: selectedModel, draft_text: content, max_suggestions: 10, temperature: temperature ?? undefined, top_p: topP ?? undefined },
       (event: SSEEvent) => {
         if (event.type === 'refine_start') {
           showToast('success', `开始精修，分析 ${event.total || 0} 段`);
@@ -410,7 +410,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
 
     abortRef.current = chaptersApi.brainstorm(
       chapter.id,
-      { model_id: selectedModel, selected_direction: selectedDirection || undefined },
+      { model_id: selectedModel, selected_direction: selectedDirection || undefined, temperature: temperature ?? undefined, top_p: topP ?? undefined },
       (event: SSEEvent) => {
         if (event.type === 'brainstorm_direction' && event.direction) {
           setBrainstormResult((prev) => ({

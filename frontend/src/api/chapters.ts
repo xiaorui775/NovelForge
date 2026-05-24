@@ -294,7 +294,7 @@ export const chaptersApi = {
 
   rewriteSelection: (
     chapterId: string,
-    data: { model_id: string; selected_text: string; instruction: string; context_before?: string; context_after?: string },
+    data: { model_id: string; selected_text: string; instruction: string; context_before?: string; context_after?: string; temperature?: number; top_p?: number },
     onEvent: (event: SSEEvent) => void,
   ): AbortController =>
     streamSSE({
@@ -306,7 +306,7 @@ export const chaptersApi = {
 
   refine: (
     chapterId: string,
-    data: { model_id: string; draft_text: string; max_suggestions?: number },
+    data: { model_id: string; draft_text: string; max_suggestions?: number; temperature?: number; top_p?: number },
     onEvent: (event: SSEEvent) => void,
   ): AbortController =>
     streamSSE({
@@ -318,7 +318,7 @@ export const chaptersApi = {
 
   brainstorm: (
     chapterId: string,
-    data: { model_id: string; selected_direction?: string },
+    data: { model_id: string; selected_direction?: string; temperature?: number; top_p?: number },
     onEvent: (event: SSEEvent) => void,
   ): AbortController =>
     streamSSE({

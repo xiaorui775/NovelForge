@@ -233,7 +233,7 @@ export default function Dashboard() {
         </>
       )}
 
-      {!showTrash && <WritingCalendar goalMarks={goalMarks} streakOverride={projectGoalsProgress?.streak_days} />}
+      {!showTrash && <div className="mb-8"><WritingCalendar goalMarks={goalMarks} streakOverride={projectGoalsProgress?.streak_days} /></div>}
 
       {!showTrash && allTags.length > 0 && (
         <div className="flex items-center gap-2 mb-6 flex-wrap">

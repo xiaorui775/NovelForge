@@ -103,17 +103,8 @@ class ForeshadowingService:
             chapter_texts = []
             for chapter, chapter_outline, cs in batch:
                 if cs and (cs.events or cs.character_states or cs.unresolved_hooks):
-                    # 有结构化摘要时优先使用，大幅省 token
-                    parts = [f"第{chapter_outline.chapter_number}章「{chapter_outline.title or '无标题'}」"]
-                    if cs.events:
-                        parts.append(f"事件: {cs.events}")
-                    if cs.character_states:
-                        parts.append(f"角色状态: {cs.character_states}")
-                    if cs.unresolved_hooks:
-                        parts.append(f"未回收悬念: {cs.unresolved_hooks}")
-                    if cs.resolved_hooks:
-                        parts.append(f"已回收伏笔: {cs.resolved_hooks}")
-                    chapter_texts.append("\n".join(parts))
+                    from app.services.common import format_chapter_card
+                    chapter_texts.append(format_chapter_card(chapter_outline, cs, chapter.content_summary))
                 else:
                     # 降级：截取正文尾部（尾部更有伏笔线索）
                     content = chapter.content or ""

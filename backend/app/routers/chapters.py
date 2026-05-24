@@ -173,6 +173,8 @@ async def generate_chapter(
                     model_id=data.model_id,
                     max_tokens=data.max_tokens,
                     template_id=data.template_id,
+                    temperature=data.temperature,
+                    top_p=data.top_p,
                 )
             else:
                 gen = service.generate_chapter_stream(
@@ -252,6 +254,8 @@ async def continue_chapter(
                 model_id=data.model_id,
                 max_tokens=data.max_tokens,
                 auto_revise=data.auto_revise,
+                temperature=data.temperature,
+                top_p=data.top_p,
             ):
                 yield f"data: {event}\n\n"
         except Exception as e:
@@ -286,6 +290,8 @@ async def rewrite_selection(
                 model_id=data.model_id,
                 context_before=data.context_before,
                 context_after=data.context_after,
+                temperature=data.temperature,
+                top_p=data.top_p,
             ):
                 yield f"data: {event}\n\n"
         except Exception as e:
@@ -315,6 +321,8 @@ async def refine_chapter(
                 model_id=data.model_id,
                 draft_text=data.draft_text,
                 max_suggestions=data.max_suggestions,
+                temperature=data.temperature,
+                top_p=data.top_p,
             ):
                 yield f"data: {event}\n\n"
         except Exception as e:
@@ -344,6 +352,8 @@ async def brainstorm_chapter(
                 chapter_id=chapter_id,
                 model_id=data.model_id,
                 selected_direction=data.selected_direction,
+                temperature=data.temperature,
+                top_p=data.top_p,
             ):
                 yield f"data: {event}\n\n"
         except ValueError as e:

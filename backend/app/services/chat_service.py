@@ -128,19 +128,20 @@ class ChatService:
                         await self.db.refresh(ch)
                         generated += 1
 
-            # 重新查询以获取最新摘要
+            # 重新查询以获取最新摘要（含结构化字段）
             co_result = await self.db.execute(
-                select(ChapterOutline, Chapter.content_summary)
+                select(ChapterOutline, Chapter, ChapterSummary)
                 .outerjoin(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
+                .outerjoin(ChapterSummary, ChapterSummary.chapter_id == Chapter.id)
                 .where(ChapterOutline.outline_id == outline.id)
                 .order_by(ChapterOutline.chapter_number)
             )
+            from app.services.common import format_chapter_card
             chapter_lines = []
-            for co, content_summary in co_result.all():
-                summary = content_summary or co.summary or "暂无"
-                chapter_lines.append(f"- 第{co.chapter_number}章 {co.title or ''}: {summary}")
+            for co, ch, cs in co_result.all():
+                chapter_lines.append(format_chapter_card(co, cs, ch.content_summary if ch else None))
             if chapter_lines:
-                parts.append("\n## 章节概览\n" + "\n".join(chapter_lines))
+                parts.append("\n## 章节状态卡\n" + "\n".join(chapter_lines))
 
             # 活跃伏笔
             fs_result = await self.db.execute(
