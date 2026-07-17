@@ -93,6 +93,48 @@ DEBUG=true
 LOG_LEVEL=INFO
 ```
 
+### 密码登录（可选）
+
+NovelForge 支持**可选密码保护**，面向个人创作者的本地/单人部署场景。认证基于标准库 HMAC token（无第三方依赖），既保证数据安全，又避免企业级鉴权的运维成本。
+
+#### 启用密码保护
+
+在后端 `.env` 中设置 `ADMIN_PASSWORD`（留空即为匿名访问，前端不显示登录页）：
+
+```env
+# 不设置 = 匿名访问，任何人打开即可使用（适合纯本地）
+# 设置后 = 前端显示登录页，所有 API（除 /api/health、/api/auth 外）需携带有效 token
+ADMIN_PASSWORD=your_admin_password
+
+# token 签名密钥——生产环境务必改为随机值，泄露后他人可伪造 token
+SECRET_KEY=please-change-this-to-a-random-string
+
+# token 有效期（分钟），默认 7 天
+ACCESS_TOKEN_EXPIRE_MINUTES=10080
+```
+
+> 生成强随机 `SECRET_KEY`：`python -c "import secrets; print(secrets.token_urlsafe(48))"`
+
+#### 登录流程
+
+1. 启用后，前端首次访问会自动展示登录页（仅"管理密码"输入框）。
+2. 输入 `ADMIN_PASSWORD` 对应的密码 → 前端调用 `POST /api/auth/login` 校验。
+   - 成功：返回 token（HMAC 签名，含过期时间戳），前端存入 `authStore` 并对后续请求附加 `Authorization` 头。
+   - 失败：后端返回 401 `密码错误`，前端提示"密码错误，请重试"。
+3. 未启用 `ADMIN_PASSWORD` 时，前端不渲染登录页，所有请求匿名放行。
+
+#### 判断是否需要登录
+
+前端启动时先调用 `GET /api/auth/status`，返回 `{ auth_required: true/false }`，据此决定是否挂载登录页。后端通过 `is_auth_enabled()`（即 `ADMIN_PASSWORD` 是否非空）判定。
+
+#### 安全说明
+
+- 密码比对与 token 签名均使用 `hmac.compare_digest` 常数时间比较，避免时序攻击。
+- token 格式：`base64url(payload).base64url(hmac_sha256(sig))`，payload 仅含过期时间戳。
+- token 校验允许 30 秒时钟偏移。
+- 未设置 `ADMIN_PASSWORD` 时，`POST /api/auth/login` 即使传密码也会签发 token，但语义上认证未激活——这种部署视为完全公开，请确保网络边界安全。
+- 修改 `ADMIN_PASSWORD` 后，**已签发的旧 token 仍有效至过期**（token 只校验签名，不查密码）；轮换密码并立即失效旧 token 的做法是同时更换 `SECRET_KEY`（签名密钥一变，旧 token 全部失效）。
+
 ### 2. 启动后端
 
 ```bash
