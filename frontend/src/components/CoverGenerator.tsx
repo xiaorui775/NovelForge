@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { coversApi, CoverImage, CoverImageGenerate } from '../api/covers';
-import { useModelState } from '../stores/modelStore';
+import { useModels, useJob } from '../api/queries';
 import { useUIStore } from '../stores/uiStore';
 
 interface CoverGeneratorProps {
@@ -21,7 +21,8 @@ const SIZES = [
 ];
 
 export default function CoverGenerator({ projectId, onCoverSelected }: CoverGeneratorProps) {
-  const { models, fetchModels } = useModelState();
+  const modelsQuery = useModels();
+  const models = modelsQuery.data ?? [];
   const { showToast } = useUIStore();
 
   const [open, setOpen] = useState(false);
@@ -29,15 +30,30 @@ export default function CoverGenerator({ projectId, onCoverSelected }: CoverGene
   const [selectedModel, setSelectedModel] = useState('');
   const [style, setStyle] = useState('');
   const [size, setSize] = useState('1024x1024');
-  const [generating, setGenerating] = useState(false);
+  const [coverJobId, setCoverJobId] = useState<string | null>(null);
   const [covers, setCovers] = useState<CoverImage[]>([]);
   const [loading, setLoading] = useState(false);
 
   const imageModels = models.filter((m) => m.model_type === 'image');
 
+  // 后台封面任务轮询：coverJobId 非空时每 2s 拉一次，终态自动停
+  const jobQuery = useJob(coverJobId);
   useEffect(() => {
-    fetchModels();
-  }, [fetchModels]);
+    const job = jobQuery.data;
+    if (!job || !coverJobId) return;
+    if (job.status === 'completed') {
+      // 后端 result 为 CoverImageResponse 等价 dict
+      const cover = job.result as CoverImage;
+      setCovers((prev) => [cover, ...prev]);
+      setCoverJobId(null);
+      showToast('success', '封面生成成功');
+    } else if (job.status === 'failed') {
+      setCoverJobId(null);
+      showToast('error', job.error || '生成失败');
+    }
+  }, [jobQuery.data, coverJobId, showToast]);
+
+  const generating = !!coverJobId;
 
   useEffect(() => {
     if (imageModels.length > 0 && !selectedModel) {
@@ -62,7 +78,6 @@ export default function CoverGenerator({ projectId, onCoverSelected }: CoverGene
 
   const handleGenerate = async () => {
     if (!prompt.trim() || !selectedModel) return;
-    setGenerating(true);
     try {
       const payload: CoverImageGenerate = {
         prompt: prompt.trim(),
@@ -72,13 +87,11 @@ export default function CoverGenerator({ projectId, onCoverSelected }: CoverGene
         style: style || undefined,
       };
       const { data } = await coversApi.generate(projectId, payload);
-      setCovers((prev) => [data, ...prev]);
-      showToast('success', '封面生成成功');
+      setCoverJobId(data.job_id); // 触发 useJob 轮询
     } catch (err: unknown) {
       const message = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '生成失败';
       showToast('error', message);
     }
-    setGenerating(false);
   };
 
   const handleSelect = async (cover: CoverImage) => {

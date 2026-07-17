@@ -60,7 +60,7 @@ class PostWriteAnalysisService:
 
         # 复用或创建 adapter
         if adapter is None:
-            adapter = AdapterFactory.create(model_config)
+            adapter = await AdapterFactory.create(model_config)
         try:
             result = await adapter.generate(messages, max_tokens=3000)
         except Exception as e:

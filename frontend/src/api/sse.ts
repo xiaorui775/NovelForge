@@ -28,7 +28,11 @@ export interface SSEStreamOptions {
   onEvent: (event: BaseSSEEvent) => void;
   interruptedMessage?: string;
   onDone?: () => void;
+  /** Override the auto-detected auth token. Pass null to send no token. */
+  token?: string | null;
 }
+
+const TOKEN_KEY = 'novelforge_token';
 
 export function streamSSE(options: SSEStreamOptions): AbortController {
   const {
@@ -41,9 +45,14 @@ export function streamSSE(options: SSEStreamOptions): AbortController {
 
   const controller = new AbortController();
 
+  // Auto-attach token unless caller explicitly passed null.
+  const token = options.token !== undefined ? options.token : localStorage.getItem(TOKEN_KEY);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
     signal: controller.signal,
   })

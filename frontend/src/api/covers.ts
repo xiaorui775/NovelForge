@@ -20,9 +20,15 @@ export interface CoverImageGenerate {
   style?: string;
 }
 
+export interface JobSubmitResponse {
+  job_id: string;
+  status: 'pending';
+}
+
 export const coversApi = {
+  // 后端 /generate 已改为后台任务：立即返回 {job_id,status}，结果由 GET /jobs/{id} 取
   generate: (projectId: string, data: CoverImageGenerate) =>
-    client.post<CoverImage>(`/projects/${projectId}/covers/generate`, data, { timeout: 180000 }),
+    client.post<JobSubmitResponse>(`/projects/${projectId}/covers/generate`, data),
 
   list: (projectId: string) =>
     client.get<{ items: CoverImage[] }>(`/projects/${projectId}/covers`),

@@ -47,7 +47,7 @@ class PacingService:
             raise ValueError("项目没有已完成的章节")
 
         results = []
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
 
         # 批量分析，每次 3 章以控制 token 消耗
         batch_size = 3

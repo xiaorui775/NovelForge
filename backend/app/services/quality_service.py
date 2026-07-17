@@ -76,7 +76,7 @@ class QualityService:
             },
         ]
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         result = await adapter.generate(messages, max_tokens=500)
 
         # 解析 AI 返回的 JSON

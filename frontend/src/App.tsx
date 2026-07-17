@@ -4,6 +4,7 @@ import { requestNotificationPermission } from './utils/notify';
 import Layout from './components/Layout';
 import PageSkeleton from './components/PageSkeleton';
 import ErrorBoundary from './components/ui/ErrorBoundary';
+import { useAuthStore } from './stores/authStore';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const ModelManager = lazy(() => import('./pages/ModelManager'));
@@ -28,6 +29,7 @@ const StoryHealth = lazy(() => import('./pages/StoryHealth'));
 const ProjectList = lazy(() => import('./pages/ProjectList'));
 const StoryBible = lazy(() => import('./pages/StoryBible'));
 const SeriesManager = lazy(() => import('./pages/SeriesManager'));
+const Login = lazy(() => import('./pages/Login'));
 const NotFound = lazy(() => import('./pages/NotFound'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
@@ -41,9 +43,29 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
+  const { init, initialized, authRequired, token } = useAuthStore();
+
   useEffect(() => {
     requestNotificationPermission();
-  }, []);
+    init();
+  }, [init]);
+
+  // While auth-required status is unknown, show a neutral skeleton
+  // so a protected deployment never flashes its real UI before login.
+  if (!initialized) {
+    return <PageSkeleton />;
+  }
+
+  // If the backend requires a password and we don't have a token, gate the app.
+  if (authRequired && !token) {
+    return (
+      <ErrorBoundary>
+        <Suspense fallback={<PageSkeleton />}>
+          <Login />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
 
   return (
     <Routes>

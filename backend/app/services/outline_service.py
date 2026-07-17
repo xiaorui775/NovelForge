@@ -187,7 +187,7 @@ class OutlineService:
         model_config = result.scalar_one_or_none()
         if not model_config:
             raise ValueError("模型不存在")
-        return AdapterFactory.create(model_config)
+        return await AdapterFactory.create(model_config)
 
     async def expand_detail_outline(
         self, chapter_outline_id: uuid.UUID, model_id: uuid.UUID
@@ -570,25 +570,19 @@ class OutlineService:
                 result = await adapter.generate(messages)
                 content_str = result.get("content", "")
 
-                import json
-                import re
-                parsed = None
-                code_block = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', content_str)
-                if code_block:
-                    try:
-                        parsed = json.loads(code_block.group(1))
-                    except json.JSONDecodeError:
-                        pass
-                if parsed is None:
-                    array_match = re.search(r'\[[\s\S]*\]', content_str)
-                    if array_match:
-                        try:
-                            parsed = json.loads(array_match.group(0))
-                        except json.JSONDecodeError:
-                            pass
+                # 统一走 extract_json（含 fence 剥离 / repair 兜底），
+                # 取代此前与 json_extract 重复的手写正则解析。
+                from app.utils.json_extract import extract_json
+                parsed: list | None = None
+                try:
+                    parsed = extract_json(content_str)
+                except ValueError:
+                    parsed = None
 
-                if parsed and isinstance(parsed, list):
+                if isinstance(parsed, list):
                     for item in parsed:
+                        if not isinstance(item, dict):
+                            continue
                         idx = item.get("index", 0)
                         actual_summaries[idx] = item
             except Exception:

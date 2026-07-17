@@ -13,7 +13,7 @@ class Scene(Base):
     __tablename__ = "scenes"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    chapter_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chapters.id", ondelete="CASCADE"))
+    chapter_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chapters.id", ondelete="CASCADE"), index=True)
     scene_number: Mapped[int] = mapped_column(Integer)
     location: Mapped[str] = mapped_column(String(200), default="")
     time: Mapped[str] = mapped_column(String(200), default="")

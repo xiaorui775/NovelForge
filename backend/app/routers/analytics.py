@@ -27,6 +27,13 @@ async def get_daily_words(days: int = 365, db: AsyncSession = Depends(get_db)):
 
     # 使用每个章节每天最后一条版本的字数，避免重复计算
     day_expr = func.to_char(ChapterVersion.created_at, "YYYY-MM-DD")
+    # Pick the latest version per (chapter, day) by created_at. PostgreSQL's
+    # max() does not support UUID, so use DISTINCT ON ordered by created_at desc.
+    latest_per_day = (
+        select(ChapterVersion.id)
+        .distinct(ChapterVersion.chapter_id, day_expr)
+        .order_by(ChapterVersion.chapter_id, day_expr, ChapterVersion.created_at.desc())
+    )
     result = await db.execute(
         select(
             day_expr.label("date"),
@@ -35,12 +42,7 @@ async def get_daily_words(days: int = 365, db: AsyncSession = Depends(get_db)):
         )
         .where(ChapterVersion.created_at >= cutoff)
         # 每个章节每天只取最后一条版本
-        .where(
-            ChapterVersion.id.in_(
-                select(func.max(ChapterVersion.id))
-                .group_by(ChapterVersion.chapter_id, day_expr)
-            )
-        )
+        .where(ChapterVersion.id.in_(latest_per_day))
         .group_by(literal_column("date"))
         .order_by(literal_column("date"))
     )
@@ -465,6 +467,11 @@ async def get_weekly_words(weeks: int = 12, db: AsyncSession = Depends(get_db)):
     weeks = min(weeks, 52)
     cutoff = datetime.utcnow() - timedelta(weeks=weeks)
     week_expr = func.to_char(ChapterVersion.created_at, "IYYY-IW")
+    latest_per_week = (
+        select(ChapterVersion.id)
+        .distinct(ChapterVersion.chapter_id, week_expr)
+        .order_by(ChapterVersion.chapter_id, week_expr, ChapterVersion.created_at.desc())
+    )
     result = await db.execute(
         select(
             week_expr.label("week"),
@@ -472,12 +479,7 @@ async def get_weekly_words(weeks: int = 12, db: AsyncSession = Depends(get_db)):
             func.count(func.distinct(ChapterVersion.chapter_id)).label("chapters"),
         )
         .where(ChapterVersion.created_at >= cutoff)
-        .where(
-            ChapterVersion.id.in_(
-                select(func.max(ChapterVersion.id))
-                .group_by(ChapterVersion.chapter_id, week_expr)
-            )
-        )
+        .where(ChapterVersion.id.in_(latest_per_week))
         .group_by(literal_column("week"))
         .order_by(literal_column("week"))
     )

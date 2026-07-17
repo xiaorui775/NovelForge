@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useModels } from '../api/queries';
 import { useModelState } from '../stores/modelStore';
 import { useUIStore } from '../stores/uiStore';
 import { useConfirm } from '../components/ConfirmDialog';
@@ -25,7 +27,11 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
 };
 
 export default function ModelManager() {
-  const { models, loading, fetchModels, createModel, updateModel, deleteModel, testModel } = useModelState();
+  const queryClient = useQueryClient();
+  const { createModel, updateModel, deleteModel, testModel } = useModelState();
+  const modelsQuery = useModels();
+  const models = modelsQuery.data ?? [];
+  const loading = modelsQuery.isLoading;
   const { showToast } = useUIStore();
   const { confirm, Dialog } = useConfirm();
   const [showForm, setShowForm] = useState(false);
@@ -44,9 +50,7 @@ export default function ModelManager() {
     max_context_tokens: 8192,
   });
 
-  useEffect(() => {
-    fetchModels();
-  }, [fetchModels]);
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['models'] });
 
   const resetForm = () => {
     setEditing(null);
@@ -96,9 +100,11 @@ export default function ModelManager() {
         const updateData: Record<string, unknown> = { ...form };
         if (!updateData.api_key) delete updateData.api_key; // Don't send empty API key
         await updateModel(editing.id, updateData);
+        invalidate();
         showToast('success', '模型已更新');
       } else {
         await createModel(form);
+        invalidate();
         showToast('success', '模型添加成功');
       }
       setShowForm(false);
@@ -123,6 +129,7 @@ export default function ModelManager() {
     if (!await confirm({ message: `确定删除模型 "${name}" 吗？`, variant: 'danger', confirmText: '删除' })) return;
     try {
       await deleteModel(id);
+      invalidate();
       showToast('success', '已删除');
     } catch {
       showToast('error', '删除失败');

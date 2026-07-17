@@ -33,7 +33,7 @@ class ChatMessage(Base):
     # AI 建议操作（JSON: {"action": "replace", "chapter_id": "...", "content": "..."}）
     suggested_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now()
+        DateTime, server_default=func.now(), index=True
     )
 
     project = relationship("Project", back_populates="chat_messages")  # noqa: F821

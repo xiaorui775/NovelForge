@@ -10,18 +10,37 @@ from app.services.cover_service import CoverService
 router = APIRouter(prefix="/projects/{project_id}/covers", tags=["covers"])
 
 
-@router.post("/generate", response_model=CoverImageResponse)
+@router.post("/generate")
 async def generate_cover(
     project_id: uuid.UUID,
     data: CoverImageGenerate,
     db: AsyncSession = Depends(get_db),
 ):
-    service = CoverService(db)
-    try:
-        cover = await service.generate_cover(project_id, data)
-        return cover
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    """生成封面图（10-60s），后台异步执行。立即返回 job_id，
+    前端轮询 ``GET /api/jobs/{job_id}``，``result`` 为 CoverImageResponse 等价 dict。"""
+    from app.services.job_service import job_service
+    from app.database import async_session
+    from app.services.cover_service import CoverService
+
+    payload = data.model_dump()
+    # model_id dump 后是 uuid -> 转 str 以便后台边界可序列化
+    payload["model_id"] = str(payload["model_id"])
+
+    async def _run(record):
+        async with async_session() as session:
+            try:
+                # 重建 data 以复用 schema 校验
+                req = CoverImageGenerate(**payload)
+                service = CoverService(session)
+                cover = await service.generate_cover(project_id, req)
+                # 返回与 CoverImageResponse 一致的 dict
+                return CoverImageResponse.model_validate(cover).model_dump(mode="json")
+            except Exception:
+                await session.rollback()
+                raise
+
+    job_id = job_service.submit("cover", {"project_id": str(project_id), "prompt": data.prompt}, _run)
+    return {"job_id": job_id, "status": "pending"}
 
 
 @router.get("", response_model=CoverImageList)

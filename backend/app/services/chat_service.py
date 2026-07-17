@@ -18,9 +18,30 @@ from app.models.model_config import ModelConfig
 from app.models.outline import ChapterOutline, Outline
 from app.models.project import Project
 from app.models.terminology import Terminology
+from app.utils.json_extract import extract_json_or_default
 from app.models.worldview import Worldview
 
 logger = logging.getLogger(__name__)
+
+# 上下文注入分级上限（Chat 上下文深度优化，§4.2 P1）。
+# 不做 token 预算迭代裁剪，仅按"块"配置上限——对个人创作者的项目规模足够，
+# 又能避免百章/几十角色时无脑全量塞满模型上下文窗导致退化。
+_CTX_MAX_CHARACTERS = 12       # 主要角色卡上限
+_CTX_MAX_TERMS = 30            # 术语上限
+_CTX_MAX_FORESHADOWINGS = 12   # 活跃伏笔上限
+_CTX_MAX_CHAPTER_CARDS = 24    # 章节状态卡展开上限；超过则前段折叠
+_CTX_MAX_CHAPTER_CHARS = 8000  # chapter 模式注入的章节全文字符上限
+
+
+# 角色重要度排序：role_type 命中主角关键词前置，其次按描述长度（信息量）降序。
+_PROTAGONIST_ROLE_TYPES = {"主角", "主人公", "protagonist", "main", "lead", "hero"}
+
+
+def _character_sort_key(c: "Character"):
+    role = (c.role_type or "").strip().lower()
+    is_lead = any(k in role for k in _PROTAGONIST_ROLE_TYPES)
+    # is_lead 置 False(0) 排前；其次按描述长度降序需取负
+    return (not is_lead, -(len(c.description or "")))
 
 
 class ChatService:
@@ -82,18 +103,23 @@ class ChatService:
             parts.append(f"\n## 全书大纲\n{outline.synopsis or '暂无'}")
 
         if characters:
+            sorted_chars = sorted(characters, key=_character_sort_key)
             char_lines = []
-            for c in characters[:10]:
+            for c in sorted_chars[:_CTX_MAX_CHARACTERS]:
                 line = f"- {c.name}"
                 if c.role_type:
                     line += f"（{c.role_type}）"
                 if c.description:
                     line += f"：{c.description[:100]}"
                 char_lines.append(line)
+            if len(sorted_chars) > _CTX_MAX_CHARACTERS:
+                char_lines.append(f"- …（另 {len(sorted_chars) - _CTX_MAX_CHARACTERS} 个次要角色已省略）")
             parts.append("\n## 主要角色\n" + "\n".join(char_lines))
 
         if terms:
-            term_lines = [f"- {t.term}: {t.description or ''}" for t in terms[:20]]
+            term_lines = [f"- {t.term}: {t.description or ''}" for t in terms[:_CTX_MAX_TERMS]]
+            if len(terms) > _CTX_MAX_TERMS:
+                term_lines.append(f"- …（另 {len(terms) - _CTX_MAX_TERMS} 条术语已省略）")
             parts.append("\n## 术语\n" + "\n".join(term_lines))
 
         # full 模式：注入全部章节摘要 + 伏笔
@@ -108,25 +134,22 @@ class ChatService:
             )
             all_rows = list(co_result.all())
 
-            # 懒生成：对最近缺失或过期摘要的章节补生成（最多 3 章，避免过多 LLM 调用）
-            if model_config:
-                from app.services.generation_service import GenerationService
-                gen_svc = GenerationService(self.db)
-                generated = 0
-                for co, ch, cs in reversed(all_rows):
-                    if generated >= 3:
-                        break
-                    if not ch or not ch.content or len(ch.content.strip()) < 100:
-                        continue
-                    need_generate = False
-                    if not cs and not ch.content_summary:
-                        need_generate = True
-                    elif cs and cs.is_stale:
-                        need_generate = True
-                    if need_generate:
-                        await gen_svc._generate_content_summary(ch, model_config)
-                        await self.db.refresh(ch)
-                        generated += 1
+            # Chat 只读使用现有摘要：缺失/过期不再内联调 LLM（此前每条消息
+            # 最多串行补 3 章摘要、每章 5-15s）。改为标记 stale 交 SummaryWorker
+            # 后台刷新；本次对话复用既有摘要。
+            stale_ids = []
+            for co, ch, cs in reversed(all_rows):
+                if not ch or not ch.content or len(ch.content.strip()) < 100:
+                    continue
+                need_refresh = (cs is None and not ch.content_summary) or (cs is not None and cs.is_stale)
+                if need_refresh and ch.id is not None:
+                    stale_ids.append(ch.id)
+            if stale_ids:
+                from app.services.summary_worker import mark_summaries_stale
+                try:
+                    await mark_summaries_stale(self.db, stale_ids[0])
+                except Exception:  # noqa: BLE001
+                    pass
 
             # 重新查询以获取最新摘要（含结构化字段）
             co_result = await self.db.execute(
@@ -137,17 +160,30 @@ class ChatService:
                 .order_by(ChapterOutline.chapter_number)
             )
             from app.services.common import format_chapter_card
-            chapter_lines = []
-            for co, ch, cs in co_result.all():
-                chapter_lines.append(format_chapter_card(co, cs, ch.content_summary if ch else None))
+            rows = list(co_result.all())
+            chapter_lines: list[str] = []
+            if len(rows) > _CTX_MAX_CHAPTER_CARDS:
+                # 超上限：前段折叠为标题清单，最近 N 章展开结构化卡片，避免几十张卡撑爆 prompt
+                head, tail = rows[: -_CTX_MAX_CHAPTER_CARDS], rows[-_CTX_MAX_CHAPTER_CARDS:]
+                head_lines = [f"  第{co.chapter_number}章 {co.title or ''}".rstrip() for co, _ch, _cs in head]
+                chapter_lines.append(
+                    "## 章节状态卡（早期章节已折叠，仅列标题）\n" + "\n".join(head_lines)
+                )
+                chapter_lines.append("## 章节状态卡（最近，展开）\n" + "\n".join(
+                    format_chapter_card(co, cs, ch.content_summary if ch else None) for co, ch, cs in tail
+                ))
+            else:
+                for co, ch, cs in rows:
+                    chapter_lines.append(format_chapter_card(co, cs, ch.content_summary if ch else None))
             if chapter_lines:
-                parts.append("\n## 章节状态卡\n" + "\n".join(chapter_lines))
+                parts.append("\n" + "\n".join(chapter_lines))
 
             # 活跃伏笔
             fs_result = await self.db.execute(
                 select(Foreshadowing)
                 .where(Foreshadowing.project_id == project.id, Foreshadowing.status != "resolved")
-                .limit(10)
+                .order_by(Foreshadowing.created_at.desc())
+                .limit(_CTX_MAX_FORESHADOWINGS)
             )
             foreshadowings = list(fs_result.scalars().all())
             if foreshadowings:
@@ -171,7 +207,15 @@ class ChatService:
                     parts.append(f"章节摘要：{chapter.content_summary}")
 
                 if context_mode == "chapter" and chapter.content:
-                    content_excerpt = chapter.content[:8000]
+                    content_text = chapter.content
+                    if len(content_text) > _CTX_MAX_CHAPTER_CHARS:
+                        content_excerpt = content_text[:_CTX_MAX_CHAPTER_CHARS]
+                        logger.info(
+                            "chat context: 章节全文 %d 字超上限 %d，已截断",
+                            len(content_text), _CTX_MAX_CHAPTER_CHARS,
+                        )
+                    else:
+                        content_excerpt = content_text
                     parts.append(f"\n## 章节全文\n{content_excerpt}")
 
                 if context_mode == "selection" and referenced_text:
@@ -259,7 +303,7 @@ class ChatService:
             messages.append({"role": msg.role, "content": msg.content})
 
         # 流式生成
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         full_content = ""
         token_count = 0
 
@@ -277,15 +321,13 @@ class ChatService:
             suggested_actions = []
             display_content = full_content
             for action_match in re.finditer(r'<!--ACTION:\s*(.*?)\s*-->', full_content, re.DOTALL):
-                try:
-                    action_data = json.loads(action_match.group(1))
-                    if action_data.get("action") in ("replace", "insert"):
-                        # 用消息的 referenced_chapter_id 覆盖 AI 输出的 chapter_id（更可靠）
-                        if referenced_chapter_id:
-                            action_data["chapter_id"] = str(referenced_chapter_id)
-                        suggested_actions.append(action_data)
-                except (json.JSONDecodeError, ValueError):
-                    pass
+                # 走统一解析：repair 兜底单引号/截断等脏片段，默认 None=跳过该 action
+                action_data = extract_json_or_default(action_match.group(1), None)
+                if isinstance(action_data, dict) and action_data.get("action") in ("replace", "insert"):
+                    # 用消息的 referenced_chapter_id 覆盖 AI 输出的 chapter_id（更可靠）
+                    if referenced_chapter_id:
+                        action_data["chapter_id"] = str(referenced_chapter_id)
+                    suggested_actions.append(action_data)
 
             # 从显示内容中移除所有 ACTION 标记
             if suggested_actions:

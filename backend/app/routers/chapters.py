@@ -619,15 +619,29 @@ async def post_write_analysis(
     data: QualityScoreRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """综合 post-write 分析：质量评分 + 一致性 + 节奏 + 伏笔 + 摘要 + 故事圣经"""
-    service = PostWriteAnalysisService(db)
-    try:
-        result = await service.analyze(chapter_id, data.model_id)
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"综合分析失败: {type(e).__name__}: {str(e)}")
+    """综合 post-write 分析：质量评分 + 一致性 + 节奏 + 伏笔 + 摘要 + 故事圣经
+
+    后台异步执行（分析通常 10-30s），立即返回 job_id，前端轮询
+    ``GET /api/jobs/{job_id}`` 取结果。单进程内存任务系统，见 JobService。
+    """
+    from app.services.job_service import job_service
+    from app.database import async_session
+    from app.services.post_write_service import PostWriteAnalysisService
+
+    model_id = data.model_id
+
+    async def _run(record):
+        # 后台任务脱离请求生命周期，需独立 DB session
+        async with async_session() as session:
+            try:
+                service = PostWriteAnalysisService(session)
+                return await service.analyze(chapter_id, model_id)
+            except Exception:
+                await session.rollback()
+                raise
+
+    job_id = job_service.submit("post_write", {"chapter_id": str(chapter_id), "model_id": str(model_id)}, _run)
+    return {"job_id": job_id, "status": "pending"}
 
 
 @router.get("/chapters/{chapter_id}/context")
@@ -773,7 +787,7 @@ async def batch_generate(
             )
             model_config = model_result.scalar_one_or_none()
             if model_config:
-                adapter = AdapterFactory.create(model_config)
+                adapter = await AdapterFactory.create(model_config)
 
             for i, co_id in enumerate(data.chapter_outline_ids):
                 # Get or create chapter

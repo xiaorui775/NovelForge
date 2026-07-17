@@ -9,6 +9,8 @@ import { projectsApi } from '../api/projects';
 import { useUIStore } from '../stores/uiStore';
 import { useConfirm } from '../components/ConfirmDialog';
 import ReverseOutlineView from '../components/ReverseOutlineView';
+import CrossChapterCheckModal from '../components/outline/CrossChapterCheckModal';
+import SplitChapterModal from '../components/outline/SplitChapterModal';
 
 export default function OutlineManager() {
   const { id: projectId } = useParams<{ id: string }>();
@@ -34,7 +36,6 @@ export default function OutlineManager() {
   const [crossChapterResult, setCrossChapterResult] = useState<CrossChapterConsistencyResult | null>(null);
   const [crossChapterChecking, setCrossChapterChecking] = useState(false);
   const [splitTarget, setSplitTarget] = useState<string | null>(null);
-  const [splitPosition, setSplitPosition] = useState(1);
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -181,10 +182,10 @@ export default function OutlineManager() {
     setCrossChapterChecking(false);
   };
 
-  const handleSplitChapter = async (chapterOutlineId: string) => {
+  const handleSplitChapter = async (chapterOutlineId: string, position: number) => {
     if (!outline) return;
     try {
-      await outlinesApi.splitChapter(chapterOutlineId, splitPosition);
+      await outlinesApi.splitChapter(chapterOutlineId, position);
       const { data: chapterList } = await outlinesApi.listChapters(outline.id);
       setChapters(chapterList);
       setSplitTarget(null);
@@ -561,7 +562,7 @@ export default function OutlineManager() {
                       写章节
                     </Link>
                     <button
-                      onClick={(e) => { e.stopPropagation(); setSplitTarget(chapter.id); setSplitPosition(1); }}
+                      onClick={(e) => { e.stopPropagation(); setSplitTarget(chapter.id); }}
                       className="p-1.5 text-parchment-dim/30 hover:text-ink transition-colors rounded-md hover:bg-study-glow"
                       title="拆分章节"
                     >
@@ -597,85 +598,19 @@ export default function OutlineManager() {
       )}
       {/* Split chapter modal */}
       {splitTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setSplitTarget(null)}>
-          <div className="card border border-ink/20 w-96" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-display text-lg font-semibold text-parchment mb-3">拆分章节</h3>
-            <p className="text-sm text-parchment-dim/60 mb-3">在第几段之后拆分？前半段留在当前章节，后半段成为新章节。</p>
-            <div className="flex items-center gap-3 mb-4">
-              <label className="text-sm text-parchment-dim/70">拆分位置</label>
-              <input
-                type="number"
-                className="input w-24 text-sm py-2"
-                min={1}
-                value={splitPosition}
-                onChange={(e) => setSplitPosition(parseInt(e.target.value) || 1)}
-              />
-              <span className="text-xs text-parchment-dim/40">段之后</span>
-            </div>
-            <div className="flex gap-3">
-              <button onClick={() => handleSplitChapter(splitTarget)} className="btn-primary text-sm">确认拆分</button>
-              <button onClick={() => setSplitTarget(null)} className="btn-ghost text-sm">取消</button>
-            </div>
-          </div>
-        </div>
+        <SplitChapterModal
+          chapterOutlineId={splitTarget}
+          onConfirm={handleSplitChapter}
+          onClose={() => setSplitTarget(null)}
+        />
       )}
 
-      {/* Cross-chapter consistency result */}
+      {/* Cross-chapter consistency result — centered modal (extracted component). */}
       {crossChapterResult && (
-        <div className="card border border-ink/20 animate-slide-up">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <div className="section-title">跨章一致性检查</div>
-              <span className="text-xs text-parchment-dim/40">已扫描 {crossChapterResult.chapters_scanned} 章</span>
-            </div>
-            <button onClick={() => setCrossChapterResult(null)} className="text-parchment-dim/40 hover:text-ink transition-colors">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          {crossChapterResult.issues.length > 0 ? (
-            <div className="space-y-2">
-              {crossChapterResult.issues.map((issue, i) => (
-                <div key={i} className={`p-3 rounded-lg text-sm ${
-                  issue.severity === 'error' ? 'bg-red-500/10 border-l-3 border-red-500/50' :
-                  issue.severity === 'warning' ? 'bg-amber-500/10 border-l-3 border-amber-500/50' :
-                  'bg-study-deep border-l-3 border-study-border'
-                }`}>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={`text-xs font-medium ${
-                      issue.severity === 'error' ? 'text-red-400' :
-                      issue.severity === 'warning' ? 'text-amber-400' :
-                      'text-parchment-dim/60'
-                    }`}>
-                      {issue.dimension === 'character' ? '角色状态' :
-                       issue.dimension === 'timeline' ? '时间线' :
-                       issue.dimension === 'location' ? '地点' :
-                       issue.dimension === 'foreshadowing' ? '伏笔' : issue.dimension}
-                    </span>
-                    {issue.from_chapter && (
-                      <span className="text-[11px] text-parchment-dim/40">第 {issue.from_chapter} 章</span>
-                    )}
-                  </div>
-                  <p className="text-parchment-dim/70 leading-relaxed">{issue.description}</p>
-                  {issue.suggestion && <p className="text-parchment-dim/45 mt-1 text-xs">建议：{issue.suggestion}</p>}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-6">
-              <svg className="w-10 h-10 text-green-400/40 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <p className="text-sm text-green-400/60">未发现跨章一致性问题</p>
-            </div>
-          )}
-          {crossChapterResult.summary && (
-            <p className="text-xs text-parchment-dim/40 leading-relaxed mt-4 pt-3 border-t border-study-border/30">
-              {crossChapterResult.summary}
-            </p>
-          )}
-        </div>
+        <CrossChapterCheckModal
+          result={crossChapterResult}
+          onClose={() => setCrossChapterResult(null)}
+        />
       )}
 
       {/* Reverse outline modal */}

@@ -14,9 +14,9 @@ class Terminology(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE")
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
-    term: Mapped[str] = mapped_column(String(100))
+    term: Mapped[str] = mapped_column(String(100), index=True)
     category: Mapped[Optional[str]] = mapped_column(String(50))
     description: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

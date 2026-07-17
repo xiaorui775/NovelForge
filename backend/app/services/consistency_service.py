@@ -51,25 +51,26 @@ class ConsistencyService:
         )
 
     async def _ensure_summaries(self, rows, model_config) -> None:
-        """对缺失或过期的 ChapterSummary 懒生成补全"""
-        if not model_config:
-            return
-        from app.services.generation_service import GenerationService
-        gen_svc = GenerationService(self.db)
+        """一致性检查只读使用现有摘要：缺失/过期的不再内联调 LLM 补生成
+        （此前会让一次一致性检查串行补多章摘要，每章 5-15s）。
+        改为标记 stale 交 SummaryWorker 后台刷新；本次扫描复用既有摘要。
+        """
+        stale_ids = []
         for row in rows:
             # row 可能是 (co, ch, cs) 或 (co, ch, cs, ...)
             ch = row[1]
             cs = row[2] if len(row) > 2 else None
             if not ch or not ch.content or len(ch.content.strip()) < 100:
                 continue
-            need_generate = False
-            if not cs and not ch.content_summary:
-                need_generate = True
-            elif cs and cs.is_stale:
-                need_generate = True
-            if need_generate:
-                await gen_svc._generate_content_summary(ch, model_config)
-                await self.db.refresh(ch)
+            need_refresh = (cs is None and not ch.content_summary) or (cs is not None and cs.is_stale)
+            if need_refresh and ch.id is not None:
+                stale_ids.append(ch.id)
+        if stale_ids:
+            from app.services.summary_worker import mark_summaries_stale
+            try:
+                await mark_summaries_stale(self.db, stale_ids[0])
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _collect_reference_data(self, project: Project, outline: Outline, chapter_outline: ChapterOutline = None, model_config=None) -> dict:
         """收集一致性检查所需的参考数据"""
@@ -225,7 +226,7 @@ severity 可选值: "info"（建议）, "warning"（警告）, "error"（错误�
             {"role": "user", "content": user_prompt},
         ]
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         result = await adapter.generate(messages, max_tokens=1500)
 
         # 解析 AI 返回的 JSON
@@ -340,7 +341,7 @@ severity 可选: info, warning, error
             {"role": "user", "content": user_prompt},
         ]
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         result = await adapter.generate(messages, max_tokens=2000)
 
         try:

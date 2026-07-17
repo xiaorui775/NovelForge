@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.model_config import ModelConfig
 from app.schemas.model_config import ModelConfigCreate, ModelConfigUpdate
-from app.utils.encryption import decrypt_api_key, encrypt_api_key
+from app.utils.encryption import decrypt_api_key_async, encrypt_api_key, clear_decrypt_cache
 
 
 class ModelService:
@@ -39,6 +39,7 @@ class ModelService:
         self.db.add(model)
         await self.db.flush()
         await self.db.refresh(model)
+        clear_decrypt_cache()
         return model
 
     async def update_model(self, model_id: uuid.UUID, data: ModelConfigUpdate) -> Optional[ModelConfig]:
@@ -55,6 +56,7 @@ class ModelService:
 
         await self.db.flush()
         await self.db.refresh(model)
+        clear_decrypt_cache()
         return model
 
     async def delete_model(self, model_id: uuid.UUID) -> bool:
@@ -62,6 +64,7 @@ class ModelService:
         if not model:
             return False
         await self.db.delete(model)
+        clear_decrypt_cache()
         return True
 
     async def test_model(self, model_id: uuid.UUID) -> dict:
@@ -69,7 +72,7 @@ class ModelService:
         if not model:
             return {"success": False, "message": "模型不存在", "latency_ms": None}
 
-        api_key = decrypt_api_key(model.api_key_encrypted)
+        api_key = await decrypt_api_key_async(model.api_key_encrypted)
         start = time.time()
 
         try:

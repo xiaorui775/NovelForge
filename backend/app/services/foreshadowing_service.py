@@ -90,7 +90,7 @@ class ForeshadowingService:
         if not chapters:
             raise ValueError("没有已完成的章节可供扫描")
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
 
         # 分批扫描，每批 3 章以控制 token 消耗
         batch_size = 3

@@ -14,7 +14,7 @@ class Chapter(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     chapter_outline_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chapter_outlines.id", ondelete="CASCADE")
+        UUID(as_uuid=True), ForeignKey("chapter_outlines.id", ondelete="CASCADE"), index=True
     )
     content: Mapped[Optional[str]] = mapped_column(Text)
     word_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -22,7 +22,7 @@ class Chapter(Base):
     token_used: Mapped[int] = mapped_column(Integer, default=0)
     cost: Mapped[float] = mapped_column(Numeric(10, 4), default=0)
     content_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="empty")
+    status: Mapped[str] = mapped_column(String(20), default="empty", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -45,9 +45,9 @@ class ChapterVersion(Base):
     model_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("model_configs.id"))
     token_used: Mapped[int] = mapped_column(Integer, default=0)
     quality_score: Mapped[Optional[float]] = mapped_column(Numeric(3, 1))
-    change_type: Mapped[str] = mapped_column(String(30), default="ai_generate")
+    change_type: Mapped[str] = mapped_column(String(30), default="ai_generate", index=True)
     diff_snapshot: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
     chapter: Mapped["Chapter"] = relationship(back_populates="versions")  # noqa: F821
 

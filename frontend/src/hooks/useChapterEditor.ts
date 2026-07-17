@@ -2,14 +2,15 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { chaptersApi, Chapter, ChapterVersion, SSEEvent, QualityScore, VersionCompare, ConsistencyCheckResult, ValidationIssue, RefineSuggestion, ChapterBrainstormResponse } from '../api/chapters';
 import { outlinesApi, ChapterOutline } from '../api/outlines';
 import { promptTemplatesApi, PromptTemplate } from '../api/promptTemplates';
-import { useModelState } from '../stores/modelStore';
+import { useModels } from '../api/queries';
 import { sendNotification } from '../utils/notify';
 import { useUIStore } from '../stores/uiStore';
 
 type SaveStatus = 'saved' | 'saving' | 'unsaved';
 
 export function useChapterEditor(chapterOutlineId: string | undefined) {
-  const { models, fetchModels } = useModelState();
+  const modelsQuery = useModels();
+  const models = modelsQuery.data ?? [];
   const { showToast } = useUIStore();
 
   const [chapterOutline, setChapterOutline] = useState<ChapterOutline | null>(null);
@@ -89,7 +90,7 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   // Keep contentRef in sync with content state for use in callbacks
   useEffect(() => { contentRef.current = content; }, [content]);
 
-  useEffect(() => { fetchModels(); }, [fetchModels]);
+  // models 经 TanStack Query 加载（见 main.tsx QueryClientProvider）；无需手动 fetch。
 
   // Restore draft from localStorage if available
   useEffect(() => {
@@ -110,7 +111,14 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   }, []);
 
   useEffect(() => {
-    if (models.length > 0 && !selectedModel) setSelectedModel(models[0].id);
+    if (models.length === 0) return;
+    // Reconcile against the persisted model. A stale id (model deleted in an
+    // earlier session) leaves the dropdown blank but selectedModel pointing at
+    // a non-existent config, which breaks context-usage / rewrite-selection
+    // ("模型不存在"). If the current selection is not among the available
+    // models, fall back to the first one — mirroring the template handler.
+    const valid = models.some((m) => m.id === selectedModel);
+    if (!valid) setSelectedModel(models[0].id);
   }, [models, selectedModel]);
 
   useEffect(() => {

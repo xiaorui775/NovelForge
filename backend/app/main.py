@@ -7,10 +7,13 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import engine, Base
-from app.routers import models, projects, outlines, chapters, export, characters, worldviews, terminology, backup, prompt_templates, cost_budget, analytics, foreshadowing, chat, cover_images, search, story_templates, scenes, notes, character_arcs, story_bible, writing_goals, series
+from app.routers import models, projects, outlines, chapters, export, characters, worldviews, terminology, backup, prompt_templates, cost_budget, analytics, foreshadowing, chat, cover_images, search, story_templates, scenes, notes, character_arcs, story_bible, writing_goals, series, auth, jobs
 from app.services.seed_service import seed_prompt_templates, seed_sample_data
 from app.services.story_template_service import seed_templates
+from app.services.summary_worker import summary_worker
 from app.database import async_session
+from app.middleware.auth import AuthMiddleware
+from app.middleware.request_id import RequestIDMiddleware
 
 
 @asynccontextmanager
@@ -20,8 +23,11 @@ async def lifespan(app: FastAPI):
     await seed_sample_data()
     async with async_session() as session:
         await seed_templates(session)
+    # 后台摘要维护 worker：周期排空 is_stale 的 ChapterSummary（Phase 2 P1）
+    summary_worker.start()
     yield
     # Shutdown
+    await summary_worker.stop()
     await engine.dispose()
 
 
@@ -32,10 +38,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Middleware added last runs outermost. CORS last so preflight (OPTIONS)
+# is never blocked by auth/request-id. Auth and request-id are inner.
+app.add_middleware(AuthMiddleware)
+app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=settings.allowed_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -81,6 +91,8 @@ app.include_router(character_arcs.router, prefix="/api")
 app.include_router(story_bible.router, prefix="/api")
 app.include_router(writing_goals.router, prefix="/api")
 app.include_router(series.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
+app.include_router(jobs.router, prefix="/api")
 
 
 @app.get("/api/health")

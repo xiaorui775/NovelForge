@@ -332,19 +332,24 @@ class GenerationService:
             )
             prev_rows = list(prev_result.all())
 
-            # 懒生成：对缺失或过期摘要的前章补生成
-            if model_config:
-                for co, ch, cs in prev_rows:
-                    if not ch or not ch.content or len(ch.content.strip()) < 100:
-                        continue
-                    need_generate = False
-                    if not cs and not ch.content_summary:
-                        need_generate = True
-                    elif cs and cs.is_stale:
-                        need_generate = True
-                    if need_generate:
-                        await self._generate_content_summary(ch, model_config)
-                        await self.db.refresh(ch)
+            # 上下文构建只读：旧摘要或已无摘要时不再内联调 LLM 生成
+            # （此前每个前章最多额外 ~5-15s 串行 LLM，严重拖慢生成链路）。
+            # 缺失/过期的摘要改为标记 stale，交给 SummaryWorker 后台刷新；
+            # 本次生成复用既有摘要（无则回退到 chapter_outline.summary / 标题）。
+            stale_ids: list[uuid.UUID] = []
+            for co, ch, cs in prev_rows:
+                if not ch or not ch.content or len(ch.content.strip()) < 100:
+                    continue
+                need_refresh = (cs is None and not ch.content_summary) or (cs is not None and cs.is_stale)
+                if need_refresh and ch.id is not None:
+                    stale_ids.append(ch.id)
+            if stale_ids:
+                from app.services.summary_worker import mark_summaries_stale
+                try:
+                    await mark_summaries_stale(self.db, stale_ids[0])
+                except Exception:  # noqa: BLE001
+                    # 标记失败不应阻断当前生成；worker 仍会按周期扫到
+                    pass
 
             # 衰减策略：根据前章数量动态梯度
             # 8章：2完整 → 2压缩80字 → 2仅标题 → 2仅章节号
@@ -472,7 +477,7 @@ class GenerationService:
             return
         try:
             if adapter is None:
-                adapter = AdapterFactory.create(model_config)
+                adapter = await AdapterFactory.create(model_config)
             messages = [
                 {
                     "role": "system",
@@ -782,7 +787,7 @@ class GenerationService:
 
             # 创建或复用适配器
             if adapter is None:
-                adapter = AdapterFactory.create(model_config)
+                adapter = await AdapterFactory.create(model_config)
 
             # 重试通知
             if retry_count > 0:
@@ -1000,6 +1005,12 @@ class GenerationService:
                 # 生成结构化摘要（确保批量生成时下一章能看到前章摘要）
                 if not preview:
                     await self._generate_content_summary(chapter, model_config, adapter=adapter)
+                    # 本章正文落定后，后续章节的上下文摘要可能失效，交 worker 刷新
+                    from app.services.summary_worker import mark_summaries_stale
+                    try:
+                        await mark_summaries_stale(self.db, chapter.id)
+                    except Exception:  # noqa: BLE001
+                        pass
 
                 return  # 成功完成，退出重试循环
 
@@ -1135,7 +1146,7 @@ class GenerationService:
 
         # 创建或复用适配器
         if adapter is None:
-            adapter = AdapterFactory.create(model_config)
+            adapter = await AdapterFactory.create(model_config)
 
         # 流式生成
         start_time = time.time()
@@ -1228,6 +1239,12 @@ class GenerationService:
 
             # 生成结构化摘要
             await self._generate_content_summary(chapter, model_config, adapter=adapter)
+            # 本章正文落定后，后续章节上下文摘要可能失效，交 worker 刷新
+            from app.services.summary_worker import mark_summaries_stale
+            try:
+                await mark_summaries_stale(self.db, chapter.id)
+            except Exception:  # noqa: BLE001
+                pass
 
             # 后写验证（零 LLM 成本）
             target = project.target_words_per_chapter_min or 0
@@ -1322,7 +1339,7 @@ class GenerationService:
             return
         try:
             if adapter is None:
-                adapter = AdapterFactory.create(model_config)
+                adapter = await AdapterFactory.create(model_config)
             # 用摘要替代正文，节省 token
             content_input = chapter.content[:4000]
 
@@ -1495,7 +1512,7 @@ class GenerationService:
         ]
 
         if adapter is None:
-            adapter = AdapterFactory.create(model_config)
+            adapter = await AdapterFactory.create(model_config)
         revised_parts = []
         async for token in adapter.generate_stream(messages, max_tokens=len(content) + 1000):
             revised_parts.append(token)
@@ -1546,7 +1563,7 @@ class GenerationService:
         scenes_text = await self._get_scenes_context(chapter.id)
         story_bible_text, _ = await self._get_story_bible_context(project, outline_text)
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         modules = [
             ("detail_outline", chapter_outline.detail_outline or ""),
             ("prev_summaries", prev_summaries_text),
@@ -1605,7 +1622,7 @@ class GenerationService:
 
         yield json.dumps({"type": "refine_start", "total": min(len(paragraphs), max_suggestions)}, ensure_ascii=False)
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         suggestions_count = 0
 
         for i, para in enumerate(paragraphs):
@@ -1725,7 +1742,7 @@ class GenerationService:
             yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
         base_messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget, model_config)
         if adapter is None:
-            adapter = AdapterFactory.create(model_config)
+            adapter = await AdapterFactory.create(model_config)
 
         rounds = [
             {"name": "draft", "label": "初稿"},
@@ -1925,6 +1942,12 @@ class GenerationService:
 
         # 生成结构化摘要
         await self._generate_content_summary(chapter, model_config, adapter=adapter)
+        # 本章正文落定后，后续章节上下文摘要可能失效，交 worker 刷新
+        from app.services.summary_worker import mark_summaries_stale
+        try:
+            await mark_summaries_stale(self.db, chapter.id)
+        except Exception:  # noqa: BLE001
+            pass
 
         yield json.dumps({
             "type": "done",
@@ -1962,7 +1985,7 @@ class GenerationService:
         messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, context_budget=context_budget, model_config=model_config)
         prompt_text = messages[0]["content"] + messages[1]["content"]
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         estimated_input_tokens = adapter.count_tokens(prompt_text)
 
         # 估算 output tokens（基于目标字数）
@@ -2045,7 +2068,7 @@ class GenerationService:
         ]
 
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         full_content = ""
         token_count = 0
 
@@ -2090,7 +2113,7 @@ class GenerationService:
             model_config=model_config,
         )
 
-        adapter = AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(model_config)
         chapter_tail = (chapter.content or "")[-1800:]
 
         yield json.dumps({"type": "brainstorm_start"}, ensure_ascii=False)

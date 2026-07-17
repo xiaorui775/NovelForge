@@ -20,12 +20,12 @@ class Foreshadowing(Base):
     )
     description: Mapped[str] = mapped_column(Text, nullable=False)
     plant_chapter_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chapter_outlines.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("chapter_outlines.id", ondelete="SET NULL"), nullable=True, index=True
     )
     resolution_chapter_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chapter_outlines.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("chapter_outlines.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    status: Mapped[str] = mapped_column(String(20), default="open")  # open, resolved, abandoned
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)  # open, resolved, abandoned
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()

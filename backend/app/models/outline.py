@@ -27,7 +27,7 @@ class ChapterOutline(Base):
     __tablename__ = "chapter_outlines"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    outline_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("outlines.id", ondelete="CASCADE"))
+    outline_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("outlines.id", ondelete="CASCADE"), index=True)
     chapter_number: Mapped[int] = mapped_column(Integer)
     title: Mapped[Optional[str]] = mapped_column(String(200))
     summary: Mapped[str] = mapped_column(Text)

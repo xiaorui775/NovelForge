@@ -23,6 +23,7 @@ export default function SearchPanel({ open, onClose }: SearchPanelProps) {
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const abortRef = useRef<AbortController | null>(null);
 
   // Focus input on open
   useEffect(() => {
@@ -42,18 +43,34 @@ export default function SearchPanel({ open, onClose }: SearchPanelProps) {
     }
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
+      // Abort any previous in-flight search so a slow response can't overwrite
+      // results from a faster, newer query.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
       setLoading(true);
       try {
-        const { data } = await searchApi.search(query.trim());
+        const { data } = await searchApi.search(query.trim(), 5, controller.signal);
+        if (controller.signal.aborted) return;
         setResults(data);
         setActiveIndex(0);
-      } catch (err) {
-        console.error('Search failed:', err);
-        setResults(null);
+      } catch (err: unknown) {
+        // Canceled requests are expected on rapid typing; ignore them.
+        const canceled =
+          (err as { code?: string })?.code === 'ERR_CANCELED' ||
+          (err as { name?: string })?.name === 'CanceledError';
+        if (!canceled) {
+          console.error('Search failed:', err);
+          if (!controller.signal.aborted) setResults(null);
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
       }
-      setLoading(false);
     }, 300);
-    return () => clearTimeout(debounceRef.current);
+    return () => {
+      clearTimeout(debounceRef.current);
+      abortRef.current?.abort();
+    };
   }, [query]);
 
   // Flatten results into a navigable list

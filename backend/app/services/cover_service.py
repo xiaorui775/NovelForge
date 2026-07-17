@@ -27,7 +27,7 @@ class CoverService:
             raise ValueError("模型配置不存在")
 
         # Generate image
-        adapter = AdapterFactory.create_image_adapter(model)
+        adapter = await AdapterFactory.create_image_adapter(model)
         result = await adapter.generate_image(
             prompt=data.prompt,
             size=data.size,

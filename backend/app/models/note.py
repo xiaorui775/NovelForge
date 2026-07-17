@@ -12,7 +12,7 @@ class ProjectNote(Base):
     __tablename__ = "project_notes"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"))
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(200))
     content: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(50), default="general")

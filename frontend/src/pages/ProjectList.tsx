@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import { useProjects, useTrashProjects } from '../api/queries';
 import { useProjectStore } from '../stores/projectStore';
 import { useUIStore } from '../stores/uiStore';
 import { useConfirm } from '../components/ConfirmDialog';
 
 export default function ProjectList() {
+  const queryClient = useQueryClient();
   const {
-    projects, trashProjects, loading,
-    fetchProjects, fetchTrash, deleteProject,
-    archiveProject, unarchiveProject,
+    deleteProject, archiveProject, unarchiveProject,
     restoreProject, permanentDeleteProject,
   } = useProjectStore();
   const { showToast } = useUIStore();
@@ -17,18 +18,24 @@ export default function ProjectList() {
   const [showTrash, setShowTrash] = useState(false);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (showTrash) {
-      fetchTrash();
-    } else {
-      fetchProjects(showArchived);
-    }
-  }, [fetchProjects, fetchTrash, showArchived, showTrash]);
+  // 读取走 TanStack Query：queryKey 天然去重 + 单飞 + 缓存，替代 store 的
+  // 手写重入锁。写操作仍留在 store（含本地态乐观更新），写后失效缓存使其与
+  // server 对齐。
+  const projectsQuery = useProjects(showArchived);
+  const trashQuery = useTrashProjects();
+  const projects = projectsQuery.data ?? [];
+  const trashProjects = trashQuery.data ?? [];
+  const loading = (showTrash ? trashQuery : projectsQuery).isLoading;
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['projects'] });
+  };
 
   const handleDelete = async (id: string, name: string) => {
     if (!await confirm({ message: `确定将「${name}」移到回收站？`, variant: 'danger', confirmText: '移到回收站' })) return;
     try {
       await deleteProject(id);
+      invalidate();
       showToast('success', '项目已移到回收站');
     } catch {
       showToast('error', '删除失败');
@@ -39,6 +46,7 @@ export default function ProjectList() {
     if (!await confirm({ message: `确定永久删除「${name}」？此操作不可撤销！`, variant: 'danger', confirmText: '永久删除' })) return;
     try {
       await permanentDeleteProject(id);
+      invalidate();
       showToast('success', '项目已永久删除');
     } catch {
       showToast('error', '删除失败');
@@ -163,7 +171,7 @@ export default function ProjectList() {
 	              <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-4">
 	                {showTrash ? (
 	                  <>
-	                    <button onClick={() => restoreProject(project.id)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all" title="恢复">
+	                    <button onClick={() => restoreProject(project.id).then(invalidate)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all" title="恢复">
 	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
 	                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
 	                      </svg>
@@ -176,7 +184,7 @@ export default function ProjectList() {
 	                  </>
 	                ) : showArchived ? (
 	                  <>
-	                    <button onClick={() => unarchiveProject(project.id)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all" title="取消归档">
+	                    <button onClick={() => unarchiveProject(project.id).then(invalidate)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all" title="取消归档">
 	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
 	                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
 	                      </svg>
@@ -195,7 +203,7 @@ export default function ProjectList() {
 	                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
 	                      </svg>
 	                    </Link>
-	                    <button onClick={() => archiveProject(project.id)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-amber-400 hover:bg-amber-500/10 transition-all" title="归档">
+	                    <button onClick={() => archiveProject(project.id).then(invalidate)} className="p-1.5 rounded-md text-parchment-dim/30 hover:text-amber-400 hover:bg-amber-500/10 transition-all" title="归档">
 	                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
 	                        <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
 	                      </svg>
