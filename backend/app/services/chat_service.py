@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import uuid
+from types import SimpleNamespace
 from typing import AsyncGenerator, Optional
 
 from sqlalchemy import select
@@ -32,6 +33,17 @@ _CTX_MAX_FORESHADOWINGS = 12   # 活跃伏笔上限
 _CTX_MAX_CHAPTER_CARDS = 24    # 章节状态卡展开上限；超过则前段折叠
 _CTX_MAX_CHAPTER_CHARS = 8000  # chapter 模式注入的章节全文字符上限
 
+# 历史对话压缩分级（§4.2 P2 历史对话压缩优化）。
+# 旧实现在最近 N 轮外把每条压成一行、丢信息严重；改为按话题聚类分组 + LLM 摘要,
+# 仅在早期块足够大时触发,失败降级旧启发式,不新增缓存/列。
+_COMPRESS_KEEP_RECENT_TURNS = 3       # 最近 N 轮 (2N 条) 保持原文
+_COMPRESS_EARLY_MIN_MSGS = 14         # 早期块≥此数才触发 LLM 摘要,否则走旧启发式(延迟闸门)
+_COMPRESS_MAX_GROUPS = 4              # 最多分 N 组分别摘要(封顶 LLM 调用数)
+_COMPRESS_TARGET_GROUP_SIZE = 8       # 聚类目标每组消息数上限
+_COMPRESS_SUMMARY_MAX_TOKENS = 600    # 单组摘要 max_tokens
+_COMPRESS_KEYWORD_OVERLAP = 2         # 相邻用户轮 CJK 2-gram 共享数阈值
+_COMPRESS_MSG_TRUNCATE = 600          # 摘要 prompt 内单条消息截断
+
 
 # 角色重要度排序：role_type 命中主角关键词前置，其次按描述长度（信息量）降序。
 _PROTAGONIST_ROLE_TYPES = {"主角", "主人公", "protagonist", "main", "lead", "hero"}
@@ -42,6 +54,193 @@ def _character_sort_key(c: "Character"):
     is_lead = any(k in role for k in _PROTAGONIST_ROLE_TYPES)
     # is_lead 置 False(0) 排前；其次按描述长度降序需取负
     return (not is_lead, -(len(c.description or "")))
+
+
+# ---------------------------------------------------------------------------
+# 历史对话压缩辅助（§4.2 P2）— 模块级纯函数,便于单测,与 _character_sort_key 暴露方式一致
+# ---------------------------------------------------------------------------
+
+
+def _truncate(text: str, limit: int) -> str:
+    """截断保留前 limit 字符并追加省略号；空安全。"""
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _bigrams(text: str) -> set[str]:
+    """CJK 友好的 2-gram 集合(去空白)。用于相邻用户轮话题相似度判定,无依赖。"""
+    s = re.sub(r"\s+", "", text or "")
+    if len(s) <= 1:
+        return set()
+    return {s[i : i + 2] for i in range(len(s) - 1)}
+
+
+def _user_turns_share_topic(a: str, b: str) -> bool:
+    """相邻两个用户轮是否同话题:2-gram 交集达到 _COMPRESS_KEYWORD_OVERLAP 视为同话题。"""
+    pa, pb = _bigrams(a), _bigrams(b)
+    return bool(pa and pb and len(pa & pb) >= _COMPRESS_KEYWORD_OVERLAP)
+
+
+def _group_label(group) -> str:
+    """为摘要组生成主题标签。优先共享的 referenced_chapter_id,其次取组内首条用户消息开头。"""
+    ch_ids = {m.referenced_chapter_id for m in group if getattr(m, "referenced_chapter_id", None)}
+    if len(ch_ids) == 1:
+        return f"关于章节（id={next(iter(ch_ids))}）"
+    first_user = next((m for m in group if m.role == "user"), None)
+    if first_user:
+        head = (first_user.content or "").strip()
+        return (head[:30] or "早期对话")
+    return "早期对话"
+
+
+def _cluster_early_messages(early) -> list[list]:
+    """按话题聚类早期消息。
+
+    返回分组列表;若早期块过小(< _COMPRESS_EARLY_MIN_MSGS)返回空 list——
+    调用方据此走旧启发式。聚类只比较相邻用户轮(助手消息归入所跟随的用户轮):
+    - referenced_chapter_id 变化(且非空)即开新组;
+    - 相邻用户轮 CJK 2-gram 共享不足即开新组;
+    - 当前组达 _COMPRESS_TARGET_GROUP_SIZE 上限即开新组。
+    最后若组数 > _COMPRESS_MAX_GROUPS,按顺序合并尾部直至恰好上限,封顶 LLM 调用。
+    """
+    if not early or len(early) < _COMPRESS_EARLY_MIN_MSGS:
+        return []
+
+    groups: list[list] = []
+    cur: list = []
+    last_user_text: str | None = None
+    last_user_ch = None
+
+    def flush():
+        if cur:
+            groups.append(cur.copy())
+
+    for m in early:
+        ch = getattr(m, "referenced_chapter_id", None)
+        # 仅 user 轮作为分组的"断点决策者";助手消息跟随所在组。
+        if m.role == "user":
+            open_new = False
+            if not cur:
+                open_new = True
+            else:
+                # 章节引用变化(非空) → 新话题
+                if ch and last_user_ch and ch != last_user_ch:
+                    open_new = True
+                # 关键词不重叠 → 新话题
+                elif last_user_text and not _user_turns_share_topic(last_user_text, m.content or ""):
+                    open_new = True
+                # 当前组已达上限(在加入第 _TARGET 条之前切,保证每组 ≤ _TARGET)
+                elif len(cur) >= _COMPRESS_TARGET_GROUP_SIZE:
+                    open_new = True
+            if open_new:
+                flush()
+                cur = []
+            last_user_text = m.content or ""
+            last_user_ch = ch
+        if not cur and m.role != "user":
+            # 没有前置用户轮时,助手消息单独成组(罕见,稳健处理)
+            groups.append([m])
+            continue
+        cur.append(m)
+    flush()
+
+    # 合并尾部组至 _COMPRESS_MAX_GROUPS
+    while len(groups) > _COMPRESS_MAX_GROUPS:
+        merged = groups[-2] + groups[-1]
+        groups[-2:] = [merged]
+    return groups
+
+
+def _heuristic_compress_group(group) -> str:
+    """旧启发式:逐条压一行。逻辑搬自原 _compress_history 循环体,保证降级时行为不漂移。"""
+    lines = []
+    for msg in group:
+        content = (msg.content or "").strip()
+        if msg.role == "user":
+            question = content
+            if len(question) > 80:
+                question = question[:80] + "…"
+            lines.append(f"用户问了：{question}")
+        elif msg.role == "assistant":
+            answer = content
+            first_sentence = answer.split("。")[0] if "。" in answer else answer.split("\n")[0]
+            if len(first_sentence) > 100:
+                first_sentence = first_sentence[:100] + "…"
+            lines.append(f"助手建议：{first_sentence}")
+    return "\n".join(lines)
+
+
+def _heuristic_compress(history: list, keep_recent: int = _COMPRESS_KEEP_RECENT_TURNS) -> list:
+    """旧的整段启发式压缩,镜像原 _compress_history 行为。
+
+    返回 [历史概要] 合成消息 + 最近 keep_recent*2 条原文,供 LLM 路径异常或未达阈值时兜底。
+    """
+    if len(history) <= keep_recent * 2:
+        return list(history)
+
+    split_point = len(history) - keep_recent * 2
+    early_summary = _heuristic_compress_group(history[:split_point])
+    result: list = [
+        SimpleNamespace(
+            role="user",
+            content=f"[历史概要]\n{early_summary}\n[以上是之前的对话概要，以下是最新对话]",
+        )
+    ]
+    result.extend(history[split_point:])
+    return result
+
+
+_SUMMARY_SYSTEM = (
+    "你是写作助手的对话压缩器。"
+    "将一组已发生的创作对话压缩为简洁的中文要点摘要，"
+    "保留：用户讨论的核心意图、助手给出的关键建议、"
+    "以及任何已达成的一致/决定（尤其是 ACTION 即将执行的改写决定）。"
+    "丢弃寒暄、重复信息与冗余展开。只输出 JSON。"
+)
+
+_SUMMARY_USER_TMPL = (
+    "以下是第 {idx}/{total} 组早期对话，请压缩。\n"
+    "严格只返回如下 JSON，不要任何额外文字或代码块：\n"
+    '{{"summary": "3-6 条要点，用中文分号或换行分隔；开头标注主题"}}\n\n'
+    "对话内容：\n{dialogue}"
+)
+
+
+async def _summarize_group(adapter, index: int, total: int, group) -> str | None:
+    """调用 adapter.generate() 生成一组对话的摘要。返回 None 表示该组需降级。"""
+    dialogue = "\n".join(
+        f"{m.role}: {_truncate(m.content or '', _COMPRESS_MSG_TRUNCATE)}" for m in group
+    )
+    try:
+        result = await adapter.generate(
+            [
+                {"role": "system", "content": _SUMMARY_SYSTEM},
+                {
+                    "role": "user",
+                    "content": _SUMMARY_USER_TMPL.format(
+                        idx=index + 1, total=total, dialogue=dialogue
+                    ),
+                },
+            ],
+            max_tokens=_COMPRESS_SUMMARY_MAX_TOKENS,
+            temperature=0.2,
+            top_p=0.9,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chat: 摘要生成异常 (group %d): %s", index + 1, e)
+        return None
+
+    if not result or result.get("error"):
+        return None
+    data = extract_json_or_default(result.get("content", ""), None)
+    if isinstance(data, dict) and isinstance(data.get("summary"), str) and data["summary"].strip():
+        return data["summary"].strip()
+    # 二次兜底:模型未给 JSON 但给了可用纯文本
+    text = (result.get("content") or "").strip()
+    return text if len(text) > 8 else None
 
 
 class ChatService:
@@ -288,8 +487,17 @@ class ChatService:
         await self.db.flush()
 
         # 构建对话历史（最近 3 轮保持原文，更早的压缩）
+        # adapter 复用于历史压缩分组摘要与最终的流式生成。
+        adapter = await AdapterFactory.create(model_config)
         history = await self.get_history(project_id, limit=50)
-        compressed_history = self._compress_history(history, keep_recent=3)
+        try:
+            compressed_history = await self._compress_history(
+                history, keep_recent=_COMPRESS_KEEP_RECENT_TURNS, adapter=adapter
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("chat: LLM 历史压缩失败，降级旧启发式: %s", e)
+            compressed_history = _heuristic_compress(history, _COMPRESS_KEEP_RECENT_TURNS)
+
         system_prompt = await self._build_system_prompt(
             project,
             referenced_chapter_id=referenced_chapter_id,
@@ -302,8 +510,7 @@ class ChatService:
         for msg in compressed_history:
             messages.append({"role": msg.role, "content": msg.content})
 
-        # 流式生成
-        adapter = await AdapterFactory.create(model_config)
+        # 流式生成（复用同一 adapter）
         full_content = ""
         token_count = 0
 
@@ -376,45 +583,44 @@ class ChatService:
                 ensure_ascii=False,
             )
 
-    @staticmethod
-    def _compress_history(history: list[ChatMessage], keep_recent: int = 3) -> list[ChatMessage]:
-        """压缩聊天历史：最近 keep_recent 轮保持原文，更早的压缩为关键信息摘要"""
-        if len(history) <= keep_recent * 2:
-            return history
+    async def _compress_history(
+        self,
+        history: list,
+        keep_recent: int = _COMPRESS_KEEP_RECENT_TURNS,
+        adapter=None,
+    ) -> list:
+        """压缩聊天历史:最近 keep_recent 轮原文,更早的按话题聚类分组 + LLM 摘要。
 
-        result = []
+        早期块过小或无 adapter 时降级到旧启发式(_heuristic_compress),保证不漂移、不中断。
+        """
+        if len(history) <= keep_recent * 2 or adapter is None:
+            return _heuristic_compress(history, keep_recent)
+
         split_point = len(history) - keep_recent * 2
+        early = history[:split_point]
+        groups = _cluster_early_messages(early)
+        if not groups:
+            # 未达阈值 → 旧启发式
+            return _heuristic_compress(history, keep_recent)
 
-        # 将早期消息压缩为关键信息摘要
-        early_parts = []
-        for msg in history[:split_point]:
-            content = msg.content or ""
-            if msg.role == "user":
-                # 提取用户意图关键词
-                question = content.strip()
-                if len(question) > 80:
-                    question = question[:80] + "…"
-                early_parts.append(f"用户问了：{question}")
-            elif msg.role == "assistant":
-                # 提取助手建议要点
-                answer = content.strip()
-                # 取第一句话作为核心建议
-                first_sentence = answer.split("。")[0] if "。" in answer else answer.split("\n")[0]
-                if len(first_sentence) > 100:
-                    first_sentence = first_sentence[:100] + "…"
-                early_parts.append(f"助手建议：{first_sentence}")
-        early_summary = "\n".join(early_parts)
+        total = len(groups)
+        summary_blocks: list[str] = []
+        for i, group in enumerate(groups):
+            summarized = await _summarize_group(adapter, i, total, group)
+            if summarized:
+                summary_blocks.append(f"【{_group_label(group)}】\n{summarized}")
+            else:
+                # 该组摘要失败 → 降级旧启发式单组
+                summary_blocks.append(f"【{_group_label(group)}】\n{_heuristic_compress_group(group)}")
 
-        from types import SimpleNamespace
-        result.append(SimpleNamespace(
-            role="user",
-            content=f"[历史概要]\n{early_summary}\n[以上是之前的对话概要，以下是最新对话]",
-        ))
-
-        # 最近的保持原文
-        for msg in history[split_point:]:
-            result.append(msg)
-
+        merged = "\n\n".join(summary_blocks)
+        result: list = [
+            SimpleNamespace(
+                role="user",
+                content=f"[历史概要]\n{merged}\n[以上是之前的对话概要，以下是最新对话]",
+            )
+        ]
+        result.extend(history[split_point:])
         return result
 
     async def clear_history(self, project_id: uuid.UUID) -> None:
