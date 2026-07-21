@@ -1400,6 +1400,50 @@ class GenerationService:
         except Exception as e:
             logger.warning(f"摘要生成失败 (chapter_id={chapter.id}): {e}")
 
+    async def regenerate_summary(self, chapter_outline_id: uuid.UUID, model_id: uuid.UUID) -> dict:
+        """手动重生章节摘要(结构化 ChapterSummary + content_summary)。
+
+        覆盖 _generate_content_summary 接入前生成的老章,或摘要当年被 try 静默吞掉的遗漏章。
+        复用 _generate_content_summary 的全部逻辑,只在外层做前置校验(抛 ValueError 给用户明确反馈)
+        并在调用后重查落库结果供前端刷新展示。
+
+        传章大纲 id(chapter_outline_id):前端 OutlineManager 上下文里拿到的就是大纲 id,
+        统一按大纲 id 找对应 chapter(无 chapter 或正文为空时抛错)。
+        """
+        result = await self.db.execute(
+            select(Chapter).where(Chapter.chapter_outline_id == chapter_outline_id)
+        )
+        chapter = result.scalars().first()
+        if not chapter:
+            raise ValueError("章节不存在")
+        if not chapter.content or len(chapter.content.strip()) < 100:
+            raise ValueError("章节正文过短，无法生成摘要")
+
+        model_result = await self.db.execute(select(ModelConfig).where(ModelConfig.id == model_id))
+        model_config = model_result.scalar_one_or_none()
+        if not model_config:
+            raise ValueError("模型不存在")
+
+        await self._generate_content_summary(chapter, model_config)
+
+        # _generate_content_summary 失败会被自身 try 静默吞掉;此处重查结果如实反映成败
+        await self.db.refresh(chapter)
+        from app.models.chapter_summary import ChapterSummary
+
+        cs_result = await self.db.execute(
+            select(ChapterSummary).where(ChapterSummary.chapter_id == chapter.id)
+        )
+        cs = cs_result.scalar_one_or_none()
+        has_summary = cs is not None and bool(
+            cs.events or cs.character_states or cs.unresolved_hooks or cs.timeline
+        )
+        return {
+            "success": has_summary or bool(chapter.content_summary),
+            "has_summary": has_summary,
+            "content_summary": chapter.content_summary,
+            "generated_at": cs.generated_at.isoformat() if cs and cs.generated_at else None,
+        }
+
     async def _sync_character_appearances(self, chapter: Chapter, character_states: dict) -> None:
         """从 ChapterSummary.character_states 自动同步角色出场记录"""
         if not character_states or not isinstance(character_states, dict):

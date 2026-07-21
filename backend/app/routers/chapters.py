@@ -30,6 +30,7 @@ from app.schemas.chapter import (
     ChapterRefineRequest,
     ChapterBrainstormRequest,
     ChapterBrainstormResponse,
+    RegenerateSummaryRequest,
 )
 from app.adapters.adapter_factory import AdapterFactory
 from app.models.model_config import ModelConfig
@@ -754,6 +755,24 @@ async def get_chapter_summary(
         "is_stale": cs.is_stale,
         "generated_at": cs.generated_at.isoformat() if cs.generated_at else None,
     }
+
+
+@router.post("/chapters/{chapter_id}/regenerate-summary")
+async def regenerate_summary(
+    chapter_id: uuid.UUID,
+    data: RegenerateSummaryRequest,
+    service: GenerationService = Depends(get_generation_service),
+):
+    """手动重生章节摘要(结构化 ChapterSummary + content_summary)。
+
+    覆盖 _generate_content_summary 接入前生成的老章,或当年摘要调用被静默吞掉的遗漏章。
+    """
+    try:
+        return await service.regenerate_summary(chapter_id, data.model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成摘要失败: {type(e).__name__}: {str(e)}")
 
 
 @router.get("/chapters/{chapter_id}/context-usage")

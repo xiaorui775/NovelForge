@@ -60,6 +60,17 @@ class QualityScoreRequest(BaseModel):
     model_id: uuid.UUID
 
 
+class RegenerateSummaryRequest(BaseModel):
+    model_id: uuid.UUID
+
+
+class RegenerateSummaryResponse(BaseModel):
+    success: bool
+    has_summary: bool
+    content_summary: Optional[str] = None
+    generated_at: Optional[str] = None
+
+
 class QualityScoreResponse(BaseModel):
     coherence: float
     writing_quality: float

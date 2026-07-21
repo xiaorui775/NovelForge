@@ -221,6 +221,11 @@ export const chaptersApi = {
       `/chapters/${chapterId}/summary`,
     ),
 
+  regenerateSummary: (chapterId: string, modelId: string) =>
+    client.post<{ success: boolean; has_summary: boolean; content_summary: string | null; generated_at: string | null }>(
+      `/chapters/${chapterId}/regenerate-summary`, { model_id: modelId }, { timeout: 180000 },
+    ),
+
   compareVersions: (chapterId: string, v1Id: string, v2Id: string) =>
     client.get<{ v1: VersionCompare; v2: VersionCompare }>(
       `/chapters/${chapterId}/versions/${v1Id}/compare/${v2Id}`,

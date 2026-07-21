@@ -31,6 +31,7 @@ export default function OutlineManager() {
   const [pacingStyle, setPacingStyle] = useState('');
   const [newChapter, setNewChapter] = useState({ title: '', summary: '' });
   const [expandingDetail, setExpandingDetail] = useState<string | null>(null);
+  const [regeneratingSummary, setRegeneratingSummary] = useState<string | null>(null);
   const [generatingOutline, setGeneratingOutline] = useState(false);
   const [showReverseOutline, setShowReverseOutline] = useState(false);
   const [crossChapterResult, setCrossChapterResult] = useState<CrossChapterConsistencyResult | null>(null);
@@ -123,6 +124,25 @@ export default function OutlineManager() {
       showToast('error', detail || '生成细纲失败');
     }
     setExpandingDetail(null);
+  };
+
+  const handleRegenerateSummary = async (chapterOutlineId: string) => {
+    if (!selectedModel) { showToast('error', '请先选择模型'); return; }
+    setRegeneratingSummary(chapterOutlineId);
+    try {
+      const { data } = await chaptersApi.regenerateSummary(chapterOutlineId, selectedModel);
+      setChapters(chapters.map(c => c.id === chapterOutlineId
+        ? { ...c, content_summary: data.content_summary ?? c.content_summary }
+        : c));
+      if (data.success) {
+        showToast('success', '摘要已生成');
+      } else {
+        showToast('error', '摘要生成失败,请检查模型配置或稍后重试');
+      }
+    } catch {
+      // 错误已由 axios 拦截器统一 toast,这里不重复弹
+    }
+    setRegeneratingSummary(null);
   };
 
   const handleGenerateOutline = async () => {
@@ -547,11 +567,29 @@ export default function OutlineManager() {
                     )}
                     {chapter.content_summary && (
                       <div className="mt-2 p-2 bg-study-card/50 rounded border-l-2 border-ink/20">
-                        <p className="text-[10px] text-ink/50 uppercase tracking-wider font-medium mb-1">内容摘要</p>
+                        <p className="text-[10px] text-ink/50 uppercase tracking-wider font-medium mb-1">
+                          内容摘要
+                          <button
+                            onClick={() => handleRegenerateSummary(chapter.id)}
+                            disabled={regeneratingSummary === chapter.id}
+                            className="ml-2 normal-case tracking-normal text-[11px] text-ink hover:underline disabled:text-parchment-dim/30"
+                          >
+                            {regeneratingSummary === chapter.id ? '生成中...' : '重新生成'}
+                          </button>
+                        </p>
                         <p className="text-[11px] text-parchment-dim/60 leading-relaxed line-clamp-3">
                           {chapter.content_summary}
                         </p>
                       </div>
+                    )}
+                    {!chapter.content_summary && (
+                      <button
+                        onClick={() => handleRegenerateSummary(chapter.id)}
+                        disabled={regeneratingSummary === chapter.id}
+                        className="mt-2 text-[11px] text-ink hover:underline disabled:text-parchment-dim/30"
+                      >
+                        {regeneratingSummary === chapter.id ? '生成中...' : '无摘要 · 生成摘要'}
+                      </button>
                     )}
                   </div>
                   <div className="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
