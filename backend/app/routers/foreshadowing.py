@@ -78,3 +78,19 @@ async def scan_foreshadowings(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"伏笔扫描失败: {type(e).__name__}: {str(e)}")
+
+
+@router.post("/projects/{project_id}/foreshadowings/suggest-resolution")
+async def suggest_resolution(
+    project_id: uuid.UUID,
+    data: ForeshadowingScanRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """为 stale open 伏笔建议回收章节(候选,不写库)。"""
+    service = ForeshadowingService(db)
+    try:
+        return await service.suggest_resolution(project_id, data.model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"伏笔回收建议失败: {type(e).__name__}: {str(e)}")

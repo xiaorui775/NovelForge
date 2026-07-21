@@ -35,6 +35,17 @@ export interface ForeshadowingScanResult {
   confidence: number;
 }
 
+export interface ForeshadowingResolutionSuggestion {
+  foreshadowing_id: string;
+  description: string;
+  plant_chapter_number: number;
+  resolution_chapter_number: number;
+  resolution_chapter_id: string;
+  confidence: number;
+  matched_hook: string;
+  reason: string;
+}
+
 export const foreshadowingApi = {
   list: (projectId: string) =>
     client.get<Foreshadowing[]>(`/projects/${projectId}/foreshadowings`),
@@ -50,4 +61,11 @@ export const foreshadowingApi = {
 
   scan: (projectId: string, modelId: string) =>
     client.post<ForeshadowingScanResult[]>(`/projects/${projectId}/foreshadowings/scan`, { model_id: modelId }, { timeout: 180000 }),
+
+  suggestResolution: (projectId: string, modelId: string) =>
+    client.post<ForeshadowingResolutionSuggestion[]>(
+      `/projects/${projectId}/foreshadowings/suggest-resolution`,
+      { model_id: modelId },
+      { timeout: 180000 },
+    ),
 };

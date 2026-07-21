@@ -8,14 +8,88 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.adapter_factory import AdapterFactory
 from app.models.chapter import Chapter
 from app.models.character import Character
+from app.models.foreshadowing import Foreshadowing
 from app.models.worldview import worldview_characters
 from app.models.model_config import ModelConfig
 from app.models.outline import ChapterOutline, Outline
 from app.models.project import Project
 from app.models.terminology import Terminology
 from app.models.worldview import Worldview
-from app.services.common import load_chapter_chain_with_model
+from app.services.common import format_chapter_card, load_chapter_chain_with_model
 from app.utils.json_extract import extract_json
+
+
+def _reference_text(terminologies, characters, worldview_info: str) -> str:
+    """把术语/角色/世界观参考数据拼成 prompt 段(单章与跨章共用)。"""
+    terms_text = (
+        "\n".join(
+            [f"- {t.term}（{getattr(t, 'category', None) or '未分类'}）: {t.description or ''}" for t in terminologies]
+        )
+        if terminologies
+        else "无"
+    )
+    chars_text = (
+        "\n".join(
+            [f"- {c.name}（{getattr(c, 'role_type', None) or '未指定'}）: {getattr(c, 'description', '') or ''}" for c in characters]
+        )
+        if characters
+        else "无"
+    )
+    return (
+        f"{worldview_info if worldview_info else ''}\n\n"
+        f"术语库：\n{terms_text}\n\n"
+        f"角色库：\n{chars_text}"
+    )
+
+
+def _assemble_cross_chapter_prompt(
+    project: Project,
+    ref_text: str,
+    chapter_cards: str,
+    open_foreshadowings_section: str,
+) -> list[dict]:
+    """拼装跨章一致性检查的 system+user messages(模块级,便于单测)。
+
+    - ref_text:术语/角色/世界观段落(消除别名/设定误报)。
+    - chapter_cards:各章 format_chapter_card 串接(去双重编码、含 resolved_hooks)。
+    - open_foreshadowings_section:待核验伏笔段落,供 foreshadowing 维度真实核验。
+    """
+    system_prompt = """你是一位资深的文学编辑，擅长检查小说中的跨章节一致性问题。
+
+检查维度：
+1. character（角色状态连贯性）：角色状态变化是否合理（如受伤后突然康复、性格突变无解释）
+2. timeline（时间线一致性）：时间线是否矛盾（如白天后又是早上、时间跳跃不合理）
+3. location（地点连贯性）：地点转换是否合理（如瞬间从A城到B城且无交代）
+4. foreshadowing（伏笔一致性）：根据"待核验伏笔"列表核对未回收伏笔是否有遗忘、已回收是否与描述吻合
+
+请严格以 JSON 格式输出：
+{
+  "issues": [
+    {
+      "dimension": "character",
+      "severity": "warning",
+      "from_chapter": 3,
+      "to_chapter": 5,
+      "description": "问题描述",
+      "suggestion": "修改建议"
+    }
+  ],
+  "summary": "总体评价"
+}
+
+severity 可选: info, warning, error
+如果没有问题，issues 为空数组。"""
+
+    user_prompt = (
+        f"小说类型：{project.genre or '未指定'}\n\n"
+        f"{ref_text}\n\n"
+        f"## 待核验伏笔\n{open_foreshadowings_section}\n\n"
+        f"## 各章节结构化摘要\n{chapter_cards}"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
 
 class ConsistencyService:
@@ -248,7 +322,6 @@ severity 可选值: "info"（建议）, "warning"（警告）, "error"（错误�
         to_chapter: Optional[int] = None,
     ) -> dict:
         """跨章节一致性扫描：利用 ChapterSummary 逐章比对角色状态、时间线、地点"""
-        from app.services.common import load_chapter_chain_with_model as _load
 
         project_result = await self.db.execute(select(Project).where(Project.id == project_id))
         project = project_result.scalar_one_or_none()
@@ -282,64 +355,44 @@ severity 可选值: "info"（建议）, "warning"（警告）, "error"（错误�
 
         co_result = await self.db.execute(query)
 
-        # 懒生成：对缺失或过期摘要的章节补生成
-        await self._ensure_summaries(co_result.all(), model_config)
+        # 摘要只读:_ensure_summaries 标 stale 交 worker;本次用既有摘要(已去冗余二次查询)
+        rows = list(co_result.all())
+        await self._ensure_summaries(rows, model_config)
 
-        # 重新查询以获取最新摘要
-        co_result = await self.db.execute(query)
-        chapter_summaries = []
-        for co, ch, cs in co_result.all():
-            entry = {"chapter_number": co.chapter_number, "title": co.title or ""}
-            if cs:
-                entry["character_states"] = cs.character_states
-                entry["events"] = cs.events
-                entry["timeline"] = cs.timeline
-                entry["locations"] = cs.locations
-                entry["unresolved_hooks"] = cs.unresolved_hooks
-            elif ch and ch.content_summary:
-                entry["summary"] = ch.content_summary
-            else:
-                entry["summary"] = co.summary
-            chapter_summaries.append(entry)
-
-        if len(chapter_summaries) < 2:
+        # 逐章用 format_chapter_card 出紧凑卡片(去双重编码、顺带消费 resolved_hooks)
+        chapter_cards = "\n".join(
+            format_chapter_card(co, cs, ch.content_summary if ch else None)
+            for co, ch, cs in rows
+        )
+        if len(rows) < 2:
             raise ValueError("至少需要2章的结构化摘要才能进行跨章检查")
 
-        # 构建 prompt
-        import json as _json
-        summaries_text = _json.dumps(chapter_summaries, ensure_ascii=False, indent=2)
+        # 注入参考上下文(术语/角色/世界观)+待核验伏笔表,消除别名/设定误报、让伏笔维度对真实数据核验
+        reference_data = await self._collect_reference_data(project, outline, None, model_config)
+        ref_text = _reference_text(
+            reference_data["terminologies"],
+            reference_data["characters"],
+            reference_data["worldview_info"],
+        )
+        # open 伏笔 + 埋设章号
+        fs_result = await self.db.execute(
+            select(Foreshadowing).where(
+                Foreshadowing.project_id == project.id, Foreshadowing.status == "open"
+            )
+        )
+        open_foreshadowings = list(fs_result.scalars().all())
+        num_map = {co.id: co.chapter_number for co, _ch, _cs in rows}
+        open_fs_lines = []
+        for f in open_foreshadowings:
+            plant_num = ""
+            if f.plant_chapter_id and f.plant_chapter_id in num_map:
+                plant_num = f"（埋设于第{num_map[f.plant_chapter_id]}章）"
+            open_fs_lines.append(f"- {f.description}{plant_num}")
+        open_foreshadowings_section = "\n".join(open_fs_lines) if open_fs_lines else "无"
 
-        system_prompt = """你是一位资深的文学编辑，擅长检查小说中的跨章节一致性问题。
-
-检查维度：
-1. character（角色状态连贯性）：角色状态变化是否合理（如受伤后突然康复、性格突变无解释）
-2. timeline（时间线一致性）：时间线是否矛盾（如白天后又是早上、时间跳跃不合理）
-3. location（地点连贯性）：地点转换是否合理（如瞬间从A城到B城且无交代）
-4. foreshadowing（伏笔一致性）：未回收伏笔是否有遗忘、已回收伏笔是否与描述吻合
-
-请严格以 JSON 格式输出：
-{
-  "issues": [
-    {
-      "dimension": "character",
-      "severity": "warning",
-      "from_chapter": 3,
-      "description": "问题描述",
-      "suggestion": "修改建议"
-    }
-  ],
-  "summary": "总体评价"
-}
-
-severity 可选: info, warning, error
-如果没有问题，issues 为空数组。"""
-
-        user_prompt = f"小说类型：{project.genre or '未指定'}\n\n各章节结构化摘要：\n{summaries_text}"
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        messages = _assemble_cross_chapter_prompt(
+            project, ref_text, chapter_cards, open_foreshadowings_section
+        )
 
         adapter = await AdapterFactory.create(model_config)
         result = await adapter.generate(messages, max_tokens=2000)
@@ -349,7 +402,7 @@ severity 可选: info, warning, error
             return {
                 "issues": data.get("issues", []),
                 "summary": data.get("summary", ""),
-                "chapters_scanned": len(chapter_summaries),
+                "chapters_scanned": len(rows),
             }
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             raise ValueError(f"AI 返回格式解析失败: {e}")

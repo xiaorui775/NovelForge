@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { foreshadowingApi, Foreshadowing, ForeshadowingScanResult } from '../api/foreshadowing';
+import { foreshadowingApi, Foreshadowing, ForeshadowingScanResult, ForeshadowingResolutionSuggestion } from '../api/foreshadowing';
 import { modelsApi, ModelConfig } from '../api/models';
+import { outlinesApi, ChapterOutline } from '../api/outlines';
 import { useProjectStore } from '../stores/projectStore';
 import { useUIStore } from '../stores/uiStore';
 
@@ -22,20 +23,36 @@ export default function ForeshadowingTracker() {
   const [selectedModel, setSelectedModel] = useState('');
   const [scanning, setScanning] = useState(false);
   const [scanResults, setScanResults] = useState<ForeshadowingScanResult[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestions, setSuggestions] = useState<ForeshadowingResolutionSuggestion[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [newDesc, setNewDesc] = useState('');
   const [newNotes, setNewNotes] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDesc, setEditDesc] = useState('');
   const [editNotes, setEditNotes] = useState('');
+  const [chapterOutlines, setChapterOutlines] = useState<ChapterOutline[]>([]);
+  const [newPlantChapterId, setNewPlantChapterId] = useState<string>('');
 
   useEffect(() => {
     if (projectId) {
       fetchProject(projectId);
       loadItems();
       loadModels();
+      loadChapterOutlines();
     }
   }, [projectId]);
+
+  const loadChapterOutlines = async () => {
+    if (!projectId) return;
+    try {
+      const { data: outline } = await outlinesApi.get(projectId);
+      if (outline?.id) {
+        const { data: chapters } = await outlinesApi.listChapters(outline.id);
+        setChapterOutlines(chapters);
+      }
+    } catch { /* silent */ }
+  };
 
   const loadItems = async () => {
     if (!projectId) return;
@@ -61,9 +78,14 @@ export default function ForeshadowingTracker() {
   const handleAdd = async () => {
     if (!projectId || !newDesc.trim()) return;
     try {
-      await foreshadowingApi.create(projectId, { description: newDesc.trim(), notes: newNotes.trim() || undefined });
+      await foreshadowingApi.create(projectId, {
+        description: newDesc.trim(),
+        notes: newNotes.trim() || undefined,
+        plant_chapter_id: newPlantChapterId || undefined,
+      });
       setNewDesc('');
       setNewNotes('');
+      setNewPlantChapterId('');
       setShowAdd(false);
       showToast('success', '伏笔已添加');
       loadItems();
@@ -138,6 +160,38 @@ export default function ForeshadowingTracker() {
     }
   };
 
+  const handleSuggestResolution = async () => {
+    if (!projectId || !selectedModel) return;
+    setSuggesting(true);
+    setSuggestions([]);
+    try {
+      const { data } = await foreshadowingApi.suggestResolution(projectId, selectedModel);
+      setSuggestions(data);
+      if (data.length === 0) {
+        showToast('info', '没有需要建议回收的陈年伏笔（仅埋设≥10章未回收才触发）');
+      } else {
+        showToast('success', `找到 ${data.length} 个回收建议`);
+      }
+    } catch {
+      // 错误 toast 已由 client 拦截器统一弹出,这里不重复
+    }
+    setSuggesting(false);
+  };
+
+  const handleAcceptSuggestion = async (s: ForeshadowingResolutionSuggestion) => {
+    try {
+      await foreshadowingApi.update(s.foreshadowing_id, {
+        resolution_chapter_id: s.resolution_chapter_id,
+        status: 'resolved',
+      });
+      setSuggestions((prev) => prev.filter((x) => x !== s));
+      showToast('success', '已标记回收并填入回收章节');
+      loadItems();
+    } catch {
+      showToast('error', '更新失败');
+    }
+  };
+
   const openStats = items.filter((i) => i.status === 'open').length;
   const resolvedStats = items.filter((i) => i.status === 'resolved').length;
 
@@ -172,6 +226,14 @@ export default function ForeshadowingTracker() {
             className="btn-secondary text-sm disabled:opacity-50"
           >
             {scanning ? '扫描中...' : 'AI 扫描'}
+          </button>
+          <button
+            onClick={handleSuggestResolution}
+            disabled={suggesting || !selectedModel}
+            className="btn-secondary text-sm disabled:opacity-50"
+            title="为埋设≥10章未回收的伏笔建议回收章节"
+          >
+            {suggesting ? '分析中...' : '建议回收'}
           </button>
           <button onClick={() => setShowAdd(!showAdd)} className="btn-primary text-sm">
             {showAdd ? '取消' : '手动添加'}
@@ -213,6 +275,21 @@ export default function ForeshadowingTracker() {
             value={newNotes}
             onChange={(e) => setNewNotes(e.target.value)}
           />
+          <div className="mb-3">
+            <label className="text-[11px] text-parchment-dim/50 block mb-1">埋设章节（可选，便于建议回收与跨章核验）</label>
+            <select
+              className="input text-xs w-full"
+              value={newPlantChapterId}
+              onChange={(e) => setNewPlantChapterId(e.target.value)}
+            >
+              <option value="">不指定</option>
+              {chapterOutlines.map((c) => (
+                <option key={c.id} value={c.id}>
+                  第{c.chapter_number}章{c.title ? `・${c.title}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
           <button onClick={handleAdd} disabled={!newDesc.trim()} className="btn-primary text-sm disabled:opacity-50">
             添加
           </button>
@@ -238,6 +315,42 @@ export default function ForeshadowingTracker() {
                     收录
                   </button>
                   <button onClick={() => setScanResults((prev) => prev.filter((_, idx) => idx !== i))} className="btn-ghost text-xs px-2 py-1 text-parchment-dim/40">
+                    忽略
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Resolution suggestions */}
+      {suggestions.length > 0 && (
+        <div className="card mb-6 animate-fade-in">
+          <div className="section-title mb-3">回收建议</div>
+          <p className="text-xs text-parchment-dim/50 mb-4">
+            以下为埋设≥10章仍未回收的伏笔给出的候选回收章节，确认后将标记为已回收并填入回收章节
+          </p>
+          <div className="space-y-3">
+            {suggestions.map((s, i) => (
+              <div key={i} className="flex items-start justify-between gap-4 bg-study-deep/50 rounded-lg p-3">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-parchment">{s.description}</p>
+                  <p className="text-[11px] text-parchment-dim/40 mt-1">
+                    第{s.plant_chapter_number}章埋设 → 候选回收于第{s.resolution_chapter_number}章 · 置信度 {(s.confidence * 100).toFixed(0)}%
+                  </p>
+                  {s.matched_hook && (
+                    <p className="text-[11px] text-parchment-dim/40 mt-0.5">匹配：{s.matched_hook}</p>
+                  )}
+                  {s.reason && (
+                    <p className="text-[11px] text-parchment-dim/40 mt-0.5">理由：{s.reason}</p>
+                  )}
+                </div>
+                <div className="flex gap-2 flex-shrink-0">
+                  <button onClick={() => handleAcceptSuggestion(s)} className="btn-ghost text-xs px-2 py-1 text-emerald-400">
+                    确认回收
+                  </button>
+                  <button onClick={() => setSuggestions((prev) => prev.filter((_, idx) => idx !== i))} className="btn-ghost text-xs px-2 py-1 text-parchment-dim/40">
                     忽略
                   </button>
                 </div>
@@ -342,7 +455,7 @@ export default function ForeshadowingTracker() {
                       <span className={`text-[11px] px-2 py-0.5 rounded-full ${cfg.bg} ${cfg.color}`}>
                         {cfg.label}
                       </span>
-                      <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex gap-1">
                         {item.status !== 'resolved' && (
                           <button
                             onClick={() => handleUpdateStatus(item.id, 'resolved')}
