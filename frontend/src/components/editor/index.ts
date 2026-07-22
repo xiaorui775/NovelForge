@@ -9,3 +9,4 @@ export { default as ScenePanel } from './ScenePanel';
 export { default as WritingContext } from './WritingContext';
 export { default as SelectionToolbar } from './SelectionToolbar';
 export { default as ChapterMemoEditor } from './ChapterMemoEditor';
+export { default as SidePanelModal } from './SidePanelModal';

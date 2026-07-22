@@ -10,6 +10,7 @@ import {
   EditorStatusBar,
   ScenePanel,
   WritingContext,
+  SidePanelModal,
 } from '../components/editor';
 import ChapterMemoEditor from '../components/editor/ChapterMemoEditor';
 import VersionDiff from '../components/VersionDiff';
@@ -195,6 +196,9 @@ export default function ChapterEditor() {
   const [polishingMode, setPolishingMode] = useState(false);
   const [currentParagraphIndex, setCurrentParagraphIndex] = useState(0);
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
+  // 右栏收弹窗的低频面板：场景 / 一致性 / 版本
+  const [showSceneModal, setShowSceneModal] = useState(false);
+  const [showConsistencyModal, setShowConsistencyModal] = useState(false);
 
   const paragraphs = useMemo(() => splitParagraphs(s.content || ''), [s.content]);
 
@@ -587,6 +591,29 @@ export default function ChapterEditor() {
             </svg>
             沉浸模式
           </button>
+          <button
+            onClick={() => setShowSceneModal(true)}
+            className="btn-ghost text-xs flex items-center gap-1.5"
+            title="场景设定"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+            </svg>
+            场景
+          </button>
+          {s.content && s.content.length > 50 && (
+            <button
+              onClick={() => setShowConsistencyModal(true)}
+              className="btn-ghost text-xs flex items-center gap-1.5"
+              title="一致性检查"
+              disabled={!s.selectedModel}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21a3.745 3.745 0 01-3.068-1.593 3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z" />
+              </svg>
+              一致性
+            </button>
+          )}
           {s.versions.length > 0 && (
             <button onClick={() => s.setShowVersions(!s.showVersions)} className="btn-ghost text-xs flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -784,30 +811,55 @@ export default function ChapterEditor() {
               </div>
             </div>
           )}
-
-          {s.content && s.content.length > 50 && (
-            <ConsistencyPanel
-              consistencyResult={s.consistencyResult}
-              checkingConsistency={s.checkingConsistency}
-              onCheck={s.handleConsistencyCheck}
-              disabled={s.checkingConsistency || s.generating || !s.selectedModel}
-            />
-          )}
-
-          <ScenePanel chapterId={s.chapter?.id || null} />
-
-          {s.showVersions && (
-            <VersionPanel
-              versions={s.versions}
-              compareVersions={s.compareVersions}
-              onToggleCompare={s.toggleCompareVersion}
-              onCompare={s.handleCompare}
-              onRestore={s.handleRestoreVersion}
-              onClose={() => { s.setShowVersions(false); }}
-            />
-          )}
         </div>
       </div>
+
+      {/* 低频面板弹窗入口 */}
+      <SidePanelModal
+        open={showSceneModal}
+        title="场景设定"
+        subtitle="POV、地点、时间、气氛"
+        onClose={() => setShowSceneModal(false)}
+        maxWidth="max-w-2xl"
+      >
+        <ScenePanel chapterId={s.chapter?.id || null} />
+      </SidePanelModal>
+
+      {s.content && s.content.length > 50 && (
+        <SidePanelModal
+          open={showConsistencyModal}
+          title="一致性检查"
+          subtitle="术语 / 角色 / 世界观 / 情节"
+          onClose={() => setShowConsistencyModal(false)}
+          maxWidth="max-w-xl"
+        >
+          <ConsistencyPanel
+            consistencyResult={s.consistencyResult}
+            checkingConsistency={s.checkingConsistency}
+            onCheck={s.handleConsistencyCheck}
+            disabled={s.checkingConsistency || s.generating || !s.selectedModel}
+          />
+        </SidePanelModal>
+      )}
+
+      {s.showVersions && (
+        <SidePanelModal
+          open={s.showVersions}
+          title="版本历史"
+          subtitle={`${s.versions.length} 个版本 · 勾选两个可对比`}
+          onClose={() => s.setShowVersions(false)}
+          maxWidth="max-w-2xl"
+        >
+          <VersionPanel
+            versions={s.versions}
+            compareVersions={s.compareVersions}
+            onToggleCompare={s.toggleCompareVersion}
+            onCompare={s.handleCompare}
+            onRestore={s.handleRestoreVersion}
+            onClose={() => { s.setShowVersions(false); }}
+          />
+        </SidePanelModal>
+      )}
 
       {s.diffData && <VersionDiff v1={s.diffData.v1} v2={s.diffData.v2} onClose={() => s.setDiffData(null)} />}
 

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { PromptTemplate } from '../../api/promptTemplates';
 import { ModelConfig } from '../../api/models';
 
@@ -46,6 +47,12 @@ export default function EditorToolbar({
   temperature, onTemperatureChange, topP, onTopPChange,
   onGenerate, onContinue, onRefine, onStop,
 }: EditorToolbarProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const activeCount = [
+    autoScore, multiRound, autoRevise, previewMode,
+    temperature !== null, topP !== null,
+  ].filter(Boolean).length;
+
   return (
     <div className="space-y-4">
       <div className="card-compact">
@@ -65,87 +72,108 @@ export default function EditorToolbar({
         </div>
       )}
 
-      <div className="card-compact">
-        <label className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block mb-2">自动评分</label>
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm text-parchment-dim/70">生成后自动评分</span>
-          <button onClick={() => onAutoScoreChange(!autoScore)} className={`relative w-9 h-5 rounded-full transition-colors ${autoScore ? 'bg-ink' : 'bg-study-deep'}`}>
-            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${autoScore ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
-          </button>
-        </div>
-        {autoScore && (
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[11px] text-parchment-dim/50">最低阈值</span>
-              <span className="text-[11px] text-parchment-dim/70 font-mono">{scoreThreshold.toFixed(1)}</span>
+      {/* 高级选项：评分 / 多轮 / 自动修改 / 预览 / 生成参数 —— 低频，默认折叠 */}
+      <div className="card-compact p-0 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 hover:bg-study-glow/40 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <svg
+              className={`w-3 h-3 text-parchment-dim/40 transition-transform ${advancedOpen ? 'rotate-90' : ''}`}
+              fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            <span className="text-[11px] text-parchment-dim/55 uppercase tracking-wider font-medium">高级选项</span>
+          </div>
+          {activeCount > 0 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-ink/15 text-ink/80 font-medium">
+              已启用 {activeCount}
+            </span>
+          )}
+        </button>
+        {advancedOpen && (
+          <div className="px-4 pb-4 space-y-3 border-t border-study-border/30">
+            <div className="mt-3">
+              <label className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block mb-2">自动评分</label>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm text-parchment-dim/70">生成后自动评分</span>
+                <button onClick={() => onAutoScoreChange(!autoScore)} className={`relative w-9 h-5 rounded-full transition-colors ${autoScore ? 'bg-ink' : 'bg-study-deep'}`}>
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${autoScore ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
+                </button>
+              </div>
+              {autoScore && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-parchment-dim/50">最低阈值</span>
+                    <span className="text-[11px] text-parchment-dim/70 font-mono">{scoreThreshold.toFixed(1)}</span>
+                  </div>
+                  <input type="range" min="4" max="8" step="0.5" value={scoreThreshold} onChange={(e) => onScoreThresholdChange(parseFloat(e.target.value))} className="w-full h-1.5 bg-study-deep rounded-full appearance-none cursor-pointer accent-ink" />
+                  <div className="flex justify-between text-[10px] text-parchment-dim/30 mt-1"><span>4.0</span><span>8.0</span></div>
+                </div>
+              )}
             </div>
-            <input type="range" min="4" max="8" step="0.5" value={scoreThreshold} onChange={(e) => onScoreThresholdChange(parseFloat(e.target.value))} className="w-full h-1.5 bg-study-deep rounded-full appearance-none cursor-pointer accent-ink" />
-            <div className="flex justify-between text-[10px] text-parchment-dim/30 mt-1"><span>4.0</span><span>8.0</span></div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block">多轮生成</span>
+                <span className="text-[10px] text-parchment-dim/30">初稿 → 审校 → 定稿</span>
+              </div>
+              <button onClick={() => onMultiRoundChange(!multiRound)} className={`relative w-9 h-5 rounded-full transition-colors ${multiRound ? 'bg-ink' : 'bg-study-deep'}`}>
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${multiRound ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block">自动修改</span>
+                <span className="text-[10px] text-parchment-dim/30">生成后自动修复质量问题</span>
+              </div>
+              <button onClick={() => onAutoReviseChange(!autoRevise)} className={`relative w-9 h-5 rounded-full transition-colors ${autoRevise ? 'bg-ink' : 'bg-study-deep'}`}>
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${autoRevise ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block">预览模式</span>
+                <span className="text-[10px] text-parchment-dim/30">生成结果不覆盖正文，先对比再决定</span>
+              </div>
+              <button onClick={() => onPreviewModeChange(!previewMode)} className={`relative w-9 h-5 rounded-full transition-colors ${previewMode ? 'bg-ink' : 'bg-study-deep'}`}>
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${previewMode ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
+              </button>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium">生成参数</span>
+                {temperature !== null || topP !== null ? (
+                  <button onClick={() => { onTemperatureChange(null); onTopPChange(null); }} className="text-[10px] text-parchment-dim/40 hover:text-parchment-dim/70 transition-colors">重置</button>
+                ) : null}
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-parchment-dim/50">Temperature</span>
+                    <span className="text-[11px] text-parchment-dim/70 font-mono">{temperature !== null ? temperature.toFixed(1) : '默认'}</span>
+                  </div>
+                  <input type="range" min="0" max="2" step="0.1" value={temperature ?? 1} onChange={(e) => onTemperatureChange(parseFloat(e.target.value))} className="w-full h-1.5 bg-study-deep rounded-full appearance-none cursor-pointer accent-ink" />
+                  <div className="flex justify-between text-[10px] text-parchment-dim/30 mt-0.5"><span>0.0 精确</span><span>2.0 创意</span></div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-parchment-dim/50">Top P</span>
+                    <span className="text-[11px] text-parchment-dim/70 font-mono">{topP !== null ? topP.toFixed(1) : '默认'}</span>
+                  </div>
+                  <input type="range" min="0" max="1" step="0.1" value={topP ?? 1} onChange={(e) => onTopPChange(parseFloat(e.target.value))} className="w-full h-1.5 bg-study-deep rounded-full appearance-none cursor-pointer accent-ink" />
+                  <div className="flex justify-between text-[10px] text-parchment-dim/30 mt-0.5"><span>0.0 集中</span><span>1.0 多样</span></div>
+                </div>
+              </div>
+            </div>
           </div>
         )}
-      </div>
-
-      <div className="card-compact">
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block">多轮生成</span>
-            <span className="text-[10px] text-parchment-dim/30">初稿 → 审校 → 定稿</span>
-          </div>
-          <button onClick={() => onMultiRoundChange(!multiRound)} className={`relative w-9 h-5 rounded-full transition-colors ${multiRound ? 'bg-ink' : 'bg-study-deep'}`}>
-            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${multiRound ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
-          </button>
-        </div>
-      </div>
-
-      <div className="card-compact">
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block">自动修改</span>
-            <span className="text-[10px] text-parchment-dim/30">生成后自动修复质量问题</span>
-          </div>
-          <button onClick={() => onAutoReviseChange(!autoRevise)} className={`relative w-9 h-5 rounded-full transition-colors ${autoRevise ? 'bg-ink' : 'bg-study-deep'}`}>
-            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${autoRevise ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
-          </button>
-        </div>
-      </div>
-
-      <div className="card-compact">
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium block">预览模式</span>
-            <span className="text-[10px] text-parchment-dim/30">生成结果不覆盖正文，先对比再决定</span>
-          </div>
-          <button onClick={() => onPreviewModeChange(!previewMode)} className={`relative w-9 h-5 rounded-full transition-colors ${previewMode ? 'bg-ink' : 'bg-study-deep'}`}>
-            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-transform ${previewMode ? 'translate-x-4 bg-parchment' : 'bg-parchment-dim/40'}`} />
-          </button>
-        </div>
-      </div>
-
-      <div className="card-compact">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-[11px] text-parchment-dim/50 uppercase tracking-wider font-medium">生成参数</span>
-          {temperature !== null || topP !== null ? (
-            <button onClick={() => { onTemperatureChange(null); onTopPChange(null); }} className="text-[10px] text-parchment-dim/40 hover:text-parchment-dim/70 transition-colors">重置</button>
-          ) : null}
-        </div>
-        <div className="space-y-3">
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[11px] text-parchment-dim/50">Temperature</span>
-              <span className="text-[11px] text-parchment-dim/70 font-mono">{temperature !== null ? temperature.toFixed(1) : '默认'}</span>
-            </div>
-            <input type="range" min="0" max="2" step="0.1" value={temperature ?? 1} onChange={(e) => onTemperatureChange(parseFloat(e.target.value))} className="w-full h-1.5 bg-study-deep rounded-full appearance-none cursor-pointer accent-ink" />
-            <div className="flex justify-between text-[10px] text-parchment-dim/30 mt-0.5"><span>0.0 精确</span><span>2.0 创意</span></div>
-          </div>
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[11px] text-parchment-dim/50">Top P</span>
-              <span className="text-[11px] text-parchment-dim/70 font-mono">{topP !== null ? topP.toFixed(1) : '默认'}</span>
-            </div>
-            <input type="range" min="0" max="1" step="0.1" value={topP ?? 1} onChange={(e) => onTopPChange(parseFloat(e.target.value))} className="w-full h-1.5 bg-study-deep rounded-full appearance-none cursor-pointer accent-ink" />
-            <div className="flex justify-between text-[10px] text-parchment-dim/30 mt-0.5"><span>0.0 集中</span><span>1.0 多样</span></div>
-          </div>
-        </div>
       </div>
 
       {hasContent && onTogglePolishingMode && (
