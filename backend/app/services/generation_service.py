@@ -299,6 +299,84 @@ class GenerationService:
             parts.append(ctx["immediate_predecessor_text"])
         return "\n".join(parts)
 
+    @staticmethod
+    def _parse_cs_field(raw: Optional[str]) -> object:
+        """ChapterSummary 各字段是 json.dumps(...) 的字符串；解析失败统一返回 None。"""
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _format_structured_summary(cs: Optional["ChapterSummary"], compact: bool = False) -> str:
+        """把 ChapterSummary 结构化字段渲染成可拼进 prompt 的紧凑文本。
+
+        - compact=False（近章完整模式）：分节输出 事件/角色状态/未解悬念/已回收伏笔。
+        - compact=True（远章压缩模式）：仅取 events 前 2 条 + unresolved_hooks 前 3 条，单行无分节标题。
+        任一字段缺失或坏 JSON 则该字段静默跳过，整体不抛异常（生成链路不能被摘要渲染阻断）。
+        """
+        if cs is None:
+            return ""
+
+        events = GenerationService._parse_cs_field(cs.events)
+        chars = GenerationService._parse_cs_field(cs.character_states)
+        unresolved = GenerationService._parse_cs_field(cs.unresolved_hooks)
+        resolved = GenerationService._parse_cs_field(cs.resolved_hooks)
+
+        def _event_desc(e) -> str:
+            if isinstance(e, dict):
+                return str(e.get("event") or e.get("description") or "").strip()
+            return str(e or "").strip()
+
+        def _hook_text(h) -> str:
+            return str(h or "").strip()
+
+        if compact:
+            parts = []
+            if isinstance(events, list):
+                for e in events[:2]:
+                    t = _event_desc(e)
+                    if t:
+                        parts.append(t)
+            if isinstance(unresolved, list):
+                for h in unresolved[:3]:
+                    t = _hook_text(h)
+                    if t:
+                        parts.append(f"悬念:{t}")
+            return "｜".join(parts)
+
+        # 完整模式：分节
+        lines: list[str] = []
+        if isinstance(events, list) and events:
+            ev_lines = [_event_desc(e) for e in events[:3]]
+            ev_lines = [t for t in ev_lines if t]
+            if ev_lines:
+                lines.append("事件:" + "；".join(ev_lines))
+        if isinstance(chars, dict) and chars:
+            cs_lines = []
+            for name, st in chars.items():
+                if not isinstance(st, dict):
+                    continue
+                status = str(st.get("status") or "").strip()
+                emotion = str(st.get("emotion") or "").strip()
+                loc = str(st.get("location") or "").strip()
+                seg = "／".join(x for x in (status, emotion, loc) if x)
+                if seg:
+                    cs_lines.append(f"{name}:{seg}")
+            if cs_lines:
+                lines.append("状态:" + "；".join(cs_lines))
+        if isinstance(unresolved, list) and unresolved:
+            uh = [_hook_text(h) for h in unresolved if _hook_text(h)]
+            if uh:
+                lines.append("未解悬念:" + "；".join(uh))
+        if isinstance(resolved, list) and resolved:
+            rh = [_hook_text(h) for h in resolved[:2] if _hook_text(h)]
+            if rh:
+                lines.append("已回收:" + "；".join(rh))
+        return " ".join(lines)
+
     async def _build_context_bundle(
         self,
         chapter_outline: ChapterOutline,
@@ -354,20 +432,33 @@ class GenerationService:
             # 衰减策略：根据前章数量动态梯度
             # 8章：2完整 → 2压缩80字 → 2仅标题 → 2仅章节号
             # 5章：2完整 → 1压缩80字 → 2仅标题
+            # 近章（distance≤2/压缩档）额外拼 ChapterSummary 结构化要点（events/角色状态/未解悬念）。
             distance = 0
             for co, ch, cs in reversed(prev_rows):
                 distance += 1
                 content_summary = ch.content_summary if ch else None
                 summary = content_summary or co.summary or ""
                 if distance <= 2:
-                    # 最近 2 章：完整摘要
-                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}: {summary}")
+                    # 最近 2 章：完整摘要 + 结构化要点
+                    line = f"第{co.chapter_number}章 {co.title or ''}: {summary}"
+                    struct = self._format_structured_summary(cs, compact=False)
+                    if struct:
+                        line += f"\n  {struct}"
+                    prev_summaries.append(line)
                 elif distance <= 4 and max_prev >= 8:
-                    # 第 3-4 章（8章模式）：压缩到 80 字
-                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}")
+                    # 第 3-4 章（8章模式）：压缩到 80 字 + 结构化要点(compact)
+                    line = f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}"
+                    struct = self._format_structured_summary(cs, compact=True)
+                    if struct:
+                        line += f" | {struct[:80]}"
+                    prev_summaries.append(line)
                 elif distance <= 3 and max_prev < 8:
-                    # 第 3 章（5章模式）：压缩到 80 字
-                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}")
+                    # 第 3 章（5章模式）：压缩到 80 字 + 结构化要点(compact)
+                    line = f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}"
+                    struct = self._format_structured_summary(cs, compact=True)
+                    if struct:
+                        line += f" | {struct[:80]}"
+                    prev_summaries.append(line)
                 elif distance <= 6 and max_prev >= 8:
                     # 第 5-6 章（8章模式）：仅标题
                     prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}")
@@ -382,7 +473,55 @@ class GenerationService:
                 if nearest_ch and nearest_ch.content:
                     prev_content_snippet = nearest_ch.content[-500:]
 
+            # 远章结构化要点：当存在 >max_prev 章前的远章时，聚其 unresolved_hooks 与 events 骨架
+            # 解决写第 N 章（N>9）时第 1~(N-9) 章信息完全丢失的痛点（远章正文/自由文本摘要不进上下文）。
+            far_thread_text = ""
+            if chapter_outline.chapter_number > max_prev + 1:
+                far_result = await self.db.execute(
+                    select(ChapterOutline, Chapter, ChapterSummary)
+                    .outerjoin(Chapter, Chapter.chapter_outline_id == ChapterOutline.id)
+                    .outerjoin(ChapterSummary, ChapterSummary.chapter_id == Chapter.id)
+                    .where(
+                        ChapterOutline.outline_id == outline.id,
+                        ChapterOutline.chapter_number < chapter_outline.chapter_number - max_prev,
+                        ChapterOutline.chapter_number >= 1,
+                    )
+                    .order_by(ChapterOutline.chapter_number.asc())
+                )
+                far_rows = list(far_result.all())
+                hook_lines: list[str] = []
+                spine_lines: list[str] = []
+                for co, ch, cs in far_rows:
+                    if cs is None:
+                        continue
+                    unresolved = self._parse_cs_field(cs.unresolved_hooks)
+                    if isinstance(unresolved, list):
+                        hooks = [str(h or "").strip() for h in unresolved if str(h or "").strip()]
+                        if hooks:
+                            hook_lines.append(f"第{co.chapter_number}章: " + "、".join(hooks[:3]))
+                    events = self._parse_cs_field(cs.events)
+                    if isinstance(events, list) and events:
+                        ev = str((events[0].get("event") if isinstance(events[0], dict) else events[0]) or "").strip()
+                        if ev:
+                            spine_lines.append(f"第{co.chapter_number}章-{ev[:40]}")
+                # 软上限兜底（实际仍经 sections scale 统筹）
+                if hook_lines:
+                    hook_block = "未解悬念: " + "；".join(hook_lines)
+                    if len(hook_block) > 400:
+                        hook_block = hook_block[:397] + "..."
+                else:
+                    hook_block = ""
+                if spine_lines:
+                    spine_block = "主线骨架: " + "；".join(spine_lines)
+                    if len(spine_block) > 300:
+                        spine_block = spine_block[:297] + "..."
+                else:
+                    spine_block = ""
+                far_thread_text = "\n".join(b for b in (spine_block, hook_block) if b)
+
         prev_summaries_text = "\n".join(prev_summaries) if prev_summaries else ""
+        if chapter_outline.chapter_number <= 1:
+            far_thread_text = ""
 
         outline_text = f"{chapter_outline.title or ''} {chapter_outline.summary or ''} {chapter_outline.detail_outline or ''}"
         characters_text = await self._get_characters_context(project, outline_text)
@@ -417,7 +556,8 @@ class GenerationService:
         if context_budget and context_budget > 0:
             sections = [
                 ("prev_content_snippet", prev_content_snippet, 500),
-                ("prev_summaries", prev_summaries_text, 800),
+                ("prev_summaries", prev_summaries_text, 1000),
+                ("far_threads", far_thread_text, 500),
                 ("detail_outline", chapter_outline.detail_outline or "", 1500),
                 ("scenes", scenes_text, 800),
                 ("terminologies", terms_text, 600),
@@ -436,6 +576,7 @@ class GenerationService:
                     adjusted[name] = self._truncate_to_budget(text, allocated)
                 prev_content_snippet = adjusted["prev_content_snippet"]
                 prev_summaries_text = adjusted["prev_summaries"]
+                far_thread_text = adjusted["far_threads"]
                 detail_outline = adjusted["detail_outline"]
                 scenes_text = adjusted["scenes"]
                 terms_text = adjusted["terminologies"]
@@ -454,6 +595,7 @@ class GenerationService:
             "terms_text": terms_text,
             "prev_summaries_text": prev_summaries_text,
             "prev_content_snippet": prev_content_snippet,
+            "far_thread_text": far_thread_text,
             "characters_text": characters_text,
             "worldview_text": worldview_text,
             "foreshadowings_text": foreshadowings_text,
@@ -634,6 +776,7 @@ class GenerationService:
             "terminologies": bundle["terms_text"],
             "prev_summaries": bundle["prev_summaries_text"],
             "prev_content_snippet": bundle["prev_content_snippet"],
+            "far_threads": bundle.get("far_thread_text") or "",
             "style_reference": project.style_reference or "",
             "min_words": str(min_words),
             "max_words": str(max_words),
@@ -666,6 +809,8 @@ class GenerationService:
             system_parts.append(f"\n专有名词（请保持一致）：\n{bundle['terms_text']}")
         if bundle["prev_summaries_text"]:
             system_parts.append("\n前文摘要：\n" + bundle["prev_summaries_text"])
+        if bundle.get("far_thread_text"):
+            system_parts.append("\n【远章未解悬念与主线骨架（更早章节，请保持呼应）】\n" + bundle["far_thread_text"])
         if bundle["prev_content_snippet"]:
             system_parts.append(f"\n【前章末尾内容（请保持叙事衔接）】\n...{bundle['prev_content_snippet']}")
         if bundle["characters_text"]:
@@ -687,6 +832,7 @@ class GenerationService:
 - 前章摘要和前章内容片段用于衔接参考，不要重复已有内容。
 - 如果详细大纲与世界观设定冲突，以世界观设定为准。
 - 伏笔动态用于保持连贯性，不要强行回收未到期的伏笔。
+- 远章未解悬念与主线骨架仅作呼应参考，不要为回收更早的老悬念而强行改变本章主线。
 - 术语表中的专有名词必须使用指定翻译。""")
 
         user_parts = [
