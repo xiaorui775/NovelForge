@@ -23,6 +23,10 @@ class Chapter(Base):
     cost: Mapped[float] = mapped_column(Numeric(10, 4), default=0)
     content_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="empty", index=True)
+    # Incremental generation support (Phase 3.2)
+    content_draft: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    generation_status: Mapped[str] = mapped_column(String(20), default="idle", index=True)
+    generation_checkpoint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

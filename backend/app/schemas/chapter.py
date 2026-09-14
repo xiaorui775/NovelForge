@@ -16,6 +16,9 @@ class ChapterResponse(BaseModel):
     token_used: int
     cost: Decimal
     status: str
+    # Incremental generation fields (Phase 3.2)
+    generation_status: Optional[str] = "idle"
+    has_draft: bool = False
     created_at: datetime
     updated_at: datetime
 

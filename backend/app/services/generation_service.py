@@ -30,6 +30,8 @@ from app.services.quality_service import QualityService
 from app.services.common import load_chapter_chain, load_chapter_chain_with_model
 from app.utils.json_extract import extract_json
 from app.services.model_router import ModelRouter, TaskType
+from app.config import settings
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +160,14 @@ class GenerationService:
         text = "\n".join(parts)
         return text[:budget]
 
-    async def _get_foreshadowings_context(self, project: Project, chapter_number: int) -> str:
-        """获取活跃伏笔上下文（只查询未回收的伏笔）"""
+    async def _get_foreshadowings_context(self, project: Project, chapter_number: int, outline_text: str = "") -> str:
+        """获取活跃伏笔上下文（Phase 2 按需过滤）
+
+        过滤策略：
+        - status != resolved
+        - 优先级：本章可能回收 > 最近种植 > 角色相关 > 其余
+        - 最多返回 12 条，避免上下文膨胀
+        """
         result = await self.db.execute(
             select(Foreshadowing)
             .where(Foreshadowing.project_id == project.id)
@@ -169,11 +177,35 @@ class GenerationService:
                 selectinload(Foreshadowing.resolution_chapter),
             )
         )
-        foreshadowings = list(result.scalars().all())
-        if not foreshadowings:
+        all_hooks = list(result.scalars().all())
+        if not all_hooks:
             return ""
+
+        scored: list[tuple[int, Foreshadowing]] = []
+        ot = (outline_text or "").lower()
+
+        for f in all_hooks:
+            score = 0
+            # 最近 3 章内种植的伏笔优先级高
+            if f.plant_chapter and (chapter_number - f.plant_chapter.chapter_number) <= 3:
+                score += 100
+            # 关键词匹配
+            if f.description:
+                desc = f.description.lower()
+                # 简单关键词匹配：大纲中出现描述关键词
+                if any(k in ot for k in desc.split()[:5] if len(k) > 1):
+                    score += 50
+            # 有明确回收章节的略降权（避免过早加载）
+            if f.resolution_chapter and f.resolution_chapter.chapter_number > chapter_number:
+                score -= 10
+            scored.append((score, f))
+
+        # 排序后取前 12
+        scored.sort(key=lambda x: x[0], reverse=True)
+        selected = [f for _, f in scored[:12]]
+
         lines = []
-        for f in foreshadowings:
+        for f in selected:
             plant_info = ""
             if f.plant_chapter:
                 plant_info = f"（第{f.plant_chapter.chapter_number}章种植）"
@@ -430,45 +462,44 @@ class GenerationService:
                     # 标记失败不应阻断当前生成；worker 仍会按周期扫到
                     pass
 
-            # 衰减策略：根据前章数量动态梯度
-            # 8章：2完整 → 2压缩80字 → 2仅标题 → 2仅章节号
-            # 5章：2完整 → 1压缩80字 → 2仅标题
-            # 近章（distance≤2/压缩档）额外拼 ChapterSummary 结构化要点（events/角色状态/未解悬念）。
+            # 更激进的分层策略（Phase 2 成本优化）
+            # 最近 1 章：完整 + 结构化
+            # 2-3 章：压缩 60 字 + 紧凑结构化
+            # 4-6 章：仅标题 + 未解悬念
+            # 更远：仅 unresolved_hooks（从 ChapterSummary）
             distance = 0
             for co, ch, cs in reversed(prev_rows):
                 distance += 1
                 content_summary = ch.content_summary if ch else None
                 summary = content_summary or co.summary or ""
-                if distance <= 2:
-                    # 最近 2 章：完整摘要 + 结构化要点
+                if distance == 1:
                     line = f"第{co.chapter_number}章 {co.title or ''}: {summary}"
                     struct = self._format_structured_summary(cs, compact=False)
                     if struct:
                         line += f"\n  {struct}"
                     prev_summaries.append(line)
-                elif distance <= 4 and max_prev >= 8:
-                    # 第 3-4 章（8章模式）：压缩到 80 字 + 结构化要点(compact)
-                    line = f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}"
+                elif distance <= 3:
+                    line = f"第{co.chapter_number}章 {co.title or ''}: {summary[:60]}"
                     struct = self._format_structured_summary(cs, compact=True)
                     if struct:
-                        line += f" | {struct[:80]}"
+                        line += f" | {struct[:60]}"
                     prev_summaries.append(line)
-                elif distance <= 3 and max_prev < 8:
-                    # 第 3 章（5章模式）：压缩到 80 字 + 结构化要点(compact)
-                    line = f"第{co.chapter_number}章 {co.title or ''}: {summary[:80]}"
-                    struct = self._format_structured_summary(cs, compact=True)
-                    if struct:
-                        line += f" | {struct[:80]}"
+                elif distance <= 6:
+                    # 仅标题 + 关键未解悬念
+                    line = f"第{co.chapter_number}章 {co.title or ''}"
+                    unresolved = self._parse_cs_field(getattr(cs, 'unresolved_hooks', None)) if cs else None
+                    if isinstance(unresolved, list) and unresolved:
+                        hooks = [str(h)[:25] for h in unresolved[:2]]
+                        line += f"（悬念:{'、'.join(hooks)}）"
                     prev_summaries.append(line)
-                elif distance <= 6 and max_prev >= 8:
-                    # 第 5-6 章（8章模式）：仅标题
-                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}")
-                elif distance <= 5 and max_prev < 8:
-                    # 第 4-5 章（5章模式）：仅标题
-                    prev_summaries.append(f"第{co.chapter_number}章 {co.title or ''}")
                 else:
-                    # 更远：仅章节号
-                    prev_summaries.append(f"第{co.chapter_number}章")
+                    # 更远：只尝试 unresolved_hooks
+                    unresolved = self._parse_cs_field(getattr(cs, 'unresolved_hooks', None)) if cs else None
+                    if isinstance(unresolved, list) and unresolved:
+                        hooks = [str(h)[:25] for h in unresolved[:2]]
+                        prev_summaries.append(f"第{co.chapter_number}章 悬念:{'、'.join(hooks)}")
+                    else:
+                        prev_summaries.append(f"第{co.chapter_number}章")
             if prev_rows:
                 nearest_ch = prev_rows[0][1]
                 if nearest_ch and nearest_ch.content:
@@ -527,7 +558,7 @@ class GenerationService:
         outline_text = f"{chapter_outline.title or ''} {chapter_outline.summary or ''} {chapter_outline.detail_outline or ''}"
         characters_text = await self._get_characters_context(project, outline_text)
         worldview_text = await self._get_worldview_context(project, outline_text)
-        foreshadowings_text = await self._get_foreshadowings_context(project, chapter_outline.chapter_number)
+        foreshadowings_text = await self._get_foreshadowings_context(project, chapter_outline.chapter_number, outline_text)
         scenes_text = await self._get_scenes_context(chapter_id)
         story_bible_text, story_bible_entries = await self._get_story_bible_context(project, outline_text)
         series_predecessor_text = await self._get_series_predecessor_context(project)
@@ -876,6 +907,7 @@ class GenerationService:
         top_p: Optional[float] = None,
         adapter=None,
         task_type: TaskType = TaskType.GENERATE,
+        resume: bool = False,
     ) -> AsyncGenerator[str, None]:
         """流式生成章节内容，yield SSE 事件，支持自动评分重试"""
         max_retries = 2 if auto_score else 0
@@ -931,9 +963,48 @@ class GenerationService:
                 yield json.dumps({"type": "error", "message": "该章节正在生成中，请稍后再试"})
                 return
 
-            # 标记为生成中，记录原始状态用于 preview 模式恢复
+            # Cost control: hard limit on tokens
+            if settings.MAX_TOKENS_PER_GENERATION and max_tokens and max_tokens > settings.MAX_TOKENS_PER_GENERATION:
+                yield json.dumps({
+                    "type": "error",
+                    "message": f"单次生成超过硬限制 ({settings.MAX_TOKENS_PER_GENERATION} tokens)"
+                })
+                chapter.status = previous_status or "empty"
+                await self.db.flush()
+                return
+
+            # Cost pre-estimate + auto downgrade
+            try:
+                est = await self.estimate_cost(chapter_id, effective_model.id, template_id, task_type)
+                est_cost = est.get("estimated_cost", 0)
+                if settings.MAX_COST_PER_GENERATION and est_cost > settings.MAX_COST_PER_GENERATION:
+                    yield json.dumps({
+                        "type": "error",
+                        "message": f"预估费用 {est_cost:.4f} 超过硬限制 {settings.MAX_COST_PER_GENERATION}"
+                    })
+                    chapter.status = previous_status or "empty"
+                    await self.db.flush()
+                    return
+                if settings.AUTO_DOWNGRADE_THRESHOLD and est_cost > settings.AUTO_DOWNGRADE_THRESHOLD:
+                    all_models_res = await self.db.execute(select(ModelConfig).where(ModelConfig.is_active == True))
+                    router2 = ModelRouter(list(all_models_res.scalars().all()))
+                    cheaper = router2.find_cheaper_alternative(str(effective_model.id))
+                    if cheaper and str(cheaper.id) != str(effective_model.id):
+                        effective_model = cheaper
+                        adapter = await AdapterFactory.create(effective_model)
+                        yield json.dumps({
+                            "type": "model_switched",
+                            "from_model": requested_model.model_name,
+                            "to_model": effective_model.model_name,
+                            "reason": f"预估费用超过阈值，自动降级",
+                        }, ensure_ascii=False)
+            except Exception:
+                pass
+
+            # Mark as generating
             previous_status = chapter.status
             chapter.status = "generating"
+            chapter.generation_status = "generating"
             await self.db.flush()
 
             # 检查预算
@@ -952,18 +1023,27 @@ class GenerationService:
                 template = template_result.scalar_one_or_none()
 
             # 构建 prompt（根据模型上下文窗口计算预算）
-            context_budget = self._calc_context_budget(effective_model)
-            bundle = await self._build_context_bundle(
-                chapter_outline=chapter_outline,
-                project=project,
-                outline=outline,
-                chapter_id=chapter_id,
-                context_budget=context_budget,
-                model_config=effective_model,
-            )
-            if bundle["conflicts"]:
-                yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
-            messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget, effective_model)
+            # If resuming, we will prepend a continuation instruction instead of full context
+            if resume and chapter.content_draft:
+                # Minimal prompt for resume: carry last ~300 chars + instruction
+                tail = (chapter.content_draft or "")[-300:]
+                messages = [
+                    {"role": "system", "content": "继续续写以下内容，直接输出后续正文，不要重复已有内容。"},
+                    {"role": "user", "content": f"已有内容结尾：\n...{tail}\n\n请从此处继续写下去。"},
+                ]
+            else:
+                context_budget = self._calc_context_budget(effective_model)
+                bundle = await self._build_context_bundle(
+                    chapter_outline=chapter_outline,
+                    project=project,
+                    outline=outline,
+                    chapter_id=chapter_id,
+                    context_budget=context_budget,
+                    model_config=effective_model,
+                )
+                if bundle["conflicts"]:
+                    yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
+                messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget, effective_model)
 
             # 重试通知
             if retry_count > 0:
@@ -992,6 +1072,8 @@ class GenerationService:
                         "type": "error",
                         "message": "生成内容为空或过短，LLM 未返回有效内容，请检查模型配置和网络连接",
                     }, ensure_ascii=False)
+                    chapter.generation_status = "interrupted"
+                    await self.db.flush()
                     return
 
                 duration_ms = int((time.time() - start_time) * 1000)
@@ -1010,16 +1092,24 @@ class GenerationService:
                 cost = input_rate * estimated_input_tokens / 1000 + output_rate * token_used / 1000
                 chapter.cost = round(cost, 6)
 
+                # Persist draft for resume
+                if not preview:
+                    chapter.content_draft = full_content
+                    chapter.generation_checkpoint = json.dumps({
+                        "last_token_count": token_used,
+                        "last_word_count": word_count,
+                    }, ensure_ascii=False)
+
                 if preview:
-                    # 预览模式：只写入版本记录，不覆盖正文
                     chapter.status = previous_status or "empty"
+                    chapter.generation_status = "idle"
                 else:
-                    # 正式模式：覆盖正文
                     chapter.content = full_content
                     chapter.word_count = word_count
                     chapter.model_id = effective_model.id
                     chapter.token_used = token_used
                     chapter.status = "completed"
+                    chapter.generation_status = "idle"
 
                 # 自动评分
                 quality_score_value = None
@@ -1232,7 +1322,40 @@ class GenerationService:
         if chapter.status == "generating":
             yield json.dumps({"type": "error", "message": "该章节正在生成中，请稍后再试"})
             return
+
+        # Cost control for continue (Phase 3.1)
+        if settings.MAX_TOKENS_PER_GENERATION and max_tokens and max_tokens > settings.MAX_TOKENS_PER_GENERATION:
+            yield json.dumps({"type": "error", "message": f"单次续写超过硬限制 ({settings.MAX_TOKENS_PER_GENERATION} tokens)"})
+            chapter.status = "completed"
+            await self.db.flush()
+            return
+
+        try:
+            est = await self.estimate_cost(chapter_id, effective_model.id, None, TaskType.CONTINUE)
+            est_cost = est.get("estimated_cost", 0)
+            if settings.MAX_COST_PER_GENERATION and est_cost > settings.MAX_COST_PER_GENERATION:
+                yield json.dumps({"type": "error", "message": f"预估续写费用超过硬限制 {settings.MAX_COST_PER_GENERATION}"})
+                chapter.status = "completed"
+                await self.db.flush()
+                return
+            if settings.AUTO_DOWNGRADE_THRESHOLD and est_cost > settings.AUTO_DOWNGRADE_THRESHOLD:
+                all_models_res = await self.db.execute(select(ModelConfig).where(ModelConfig.is_active == True))
+                router2 = ModelRouter(list(all_models_res.scalars().all()))
+                cheaper = router2.find_cheaper_alternative(str(effective_model.id))
+                if cheaper and str(cheaper.id) != str(effective_model.id):
+                    effective_model = cheaper
+                    adapter = await AdapterFactory.create(effective_model)
+                    yield json.dumps({
+                        "type": "model_switched",
+                        "from_model": requested_model.model_name,
+                        "to_model": effective_model.model_name,
+                        "reason": "续写预估费用高，自动降级",
+                    }, ensure_ascii=False)
+        except Exception:
+            pass
+
         chapter.status = "generating"
+        chapter.generation_status = "generating"
         await self.db.flush()
 
         if not chapter.content or len(chapter.content.strip()) < 50:
@@ -1779,7 +1902,7 @@ class GenerationService:
         outline_text = f"{chapter_outline.title or ''} {chapter_outline.summary or ''} {chapter_outline.detail_outline or ''}"
         characters_text = await self._get_characters_context(project, outline_text)
         worldview_text = await self._get_worldview_context(project, outline_text)
-        foreshadowings_text = await self._get_foreshadowings_context(project, chapter_outline.chapter_number)
+        foreshadowings_text = await self._get_foreshadowings_context(project, chapter_outline.chapter_number, outline_text)
         scenes_text = await self._get_scenes_context(chapter.id)
         story_bible_text, _ = await self._get_story_bible_context(project, outline_text)
 
@@ -1930,7 +2053,40 @@ class GenerationService:
         if chapter.status == "generating":
             yield json.dumps({"type": "error", "message": "该章节正在生成中，请稍后再试"})
             return
+
+        # Cost control for continue (Phase 3.1)
+        if settings.MAX_TOKENS_PER_GENERATION and max_tokens and max_tokens > settings.MAX_TOKENS_PER_GENERATION:
+            yield json.dumps({"type": "error", "message": f"单次续写超过硬限制 ({settings.MAX_TOKENS_PER_GENERATION} tokens)"})
+            chapter.status = "completed"
+            await self.db.flush()
+            return
+
+        try:
+            est = await self.estimate_cost(chapter_id, effective_model.id, None, TaskType.CONTINUE)
+            est_cost = est.get("estimated_cost", 0)
+            if settings.MAX_COST_PER_GENERATION and est_cost > settings.MAX_COST_PER_GENERATION:
+                yield json.dumps({"type": "error", "message": f"预估续写费用超过硬限制 {settings.MAX_COST_PER_GENERATION}"})
+                chapter.status = "completed"
+                await self.db.flush()
+                return
+            if settings.AUTO_DOWNGRADE_THRESHOLD and est_cost > settings.AUTO_DOWNGRADE_THRESHOLD:
+                all_models_res = await self.db.execute(select(ModelConfig).where(ModelConfig.is_active == True))
+                router2 = ModelRouter(list(all_models_res.scalars().all()))
+                cheaper = router2.find_cheaper_alternative(str(effective_model.id))
+                if cheaper and str(cheaper.id) != str(effective_model.id):
+                    effective_model = cheaper
+                    adapter = await AdapterFactory.create(effective_model)
+                    yield json.dumps({
+                        "type": "model_switched",
+                        "from_model": requested_model.model_name,
+                        "to_model": effective_model.model_name,
+                        "reason": "续写预估费用高，自动降级",
+                    }, ensure_ascii=False)
+        except Exception:
+            pass
+
         chapter.status = "generating"
+        chapter.generation_status = "generating"
         await self.db.flush()
 
         # 检查预算

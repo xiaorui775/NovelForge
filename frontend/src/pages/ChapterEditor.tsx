@@ -743,6 +743,9 @@ export default function ChapterEditor() {
             onContinue={s.handleContinue}
             onRefine={s.handleRefine}
             onStop={s.handleStop}
+            // Phase 3.2 resume
+            onResume={canResume ? s.handleResume : undefined}
+            resumeHint={resumeHint}
           />
 
 

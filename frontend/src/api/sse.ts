@@ -20,6 +20,15 @@ export interface BaseSSEEvent {
   issues?: ValidationIssue[];
   suggestions?: RefineSuggestion[];
   total?: number;
+  // Routing / cost control events (Phase 1 + 3.1)
+  from_model?: string;
+  to_model?: string;
+  reason?: string;
+  // Cost estimate enhanced
+  selected_model_id?: string;
+  selected_model_name?: string;
+  auto_downgraded?: boolean;
+  routing_reason?: string;
 }
 
 export interface SSEStreamOptions {

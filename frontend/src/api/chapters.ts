@@ -10,6 +10,9 @@ export interface Chapter {
   token_used: number;
   cost: number;
   status: string;
+  // Phase 3.2 incremental
+  generation_status?: string;
+  content_draft?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -115,6 +118,11 @@ export interface CostEstimate {
   estimated_input_tokens: number;
   estimated_output_tokens: number;
   estimated_cost: number;
+  // Enhanced with routing (Phase 1 + 3.1)
+  selected_model_id?: string;
+  selected_model_name?: string;
+  auto_downgraded?: boolean;
+  routing_reason?: string;
 }
 
 export interface VersionCompare {
@@ -273,6 +281,19 @@ export const chaptersApi = {
       onEvent: (e) => onEvent(e as SSEEvent),
       interruptedMessage: '续写流意外中断',
     }),
+
+  // Phase 3.2: resume from draft
+  resume: (chapterId: string, data: ChapterGenerateRequest, onEvent: (event: SSEEvent) => void): AbortController =>
+    streamSSE({
+      url: `/api/chapters/${chapterId}/resume`,
+      payload: data,
+      onEvent: (e) => onEvent(e as SSEEvent),
+      interruptedMessage: '续传流意外中断',
+    }),
+
+  // Phase 3.2: cancel/interrupt generation
+  cancel: (chapterId: string) =>
+    client.post(`/chapters/${chapterId}/cancel`),
 
   regenerate: (chapterId: string, data: ChapterGenerateRequest, onEvent: (event: SSEEvent) => void): AbortController =>
     streamSSE({

@@ -33,6 +33,9 @@ interface EditorToolbarProps {
   onContinue: () => void;
   onRefine?: () => void;
   onStop?: () => void;
+  // Phase 3.2 resume
+  onResume?: () => void;
+  resumeHint?: string;
 }
 
 export default function EditorToolbar({
@@ -248,6 +251,16 @@ export default function EditorToolbar({
             <span className="ml-auto text-[10px] text-amber-300/40 font-mono">
               {temperature !== null ? `T${temperature.toFixed(1)}` : ''}{topP !== null ? ` P${topP.toFixed(1)}` : ''}
             </span>
+          </button>
+        )}
+
+        {hasContent && !generating && onResume && (
+          <button onClick={onResume} disabled={!selectedModel} className="w-full flex items-center gap-2 text-sm py-2.5 px-4 rounded-lg border border-emerald-500/30 text-emerald-300 hover:text-emerald-200 hover:bg-emerald-500/5 transition-all duration-200">
+            <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 8.25V18a2.25 2.25 0 002.25 2.25h13.5A2.25 2.25 0 0021 18V8.25m-18 0V6a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 6v2.25m-18 0h18M5.25 6h.008v.008H5.25V6zM7.5 6h.008v.008H7.5V6z" />
+            </svg>
+            续传
+            {resumeHint && <span className="ml-1 text-[10px] text-emerald-300/60">{resumeHint}</span>}
           </button>
         )}
       </div>

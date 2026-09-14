@@ -41,6 +41,7 @@ from app.services.post_write_service import PostWriteAnalysisService
 from app.services.pacing_service import PacingService
 from app.services.quality_service import QualityService
 from app.services.model_router import TaskType
+from app.config import settings
 
 router = APIRouter(tags=["chapters"])
 
@@ -205,6 +206,60 @@ async def generate_chapter(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/chapters/{chapter_id}/resume")
+async def resume_chapter(
+    chapter_id: uuid.UUID,
+    data: ChapterGenerateRequest,
+    service: GenerationService = Depends(get_generation_service),
+):
+    """从草稿断点续传生成（Phase 3.2）"""
+    async def event_stream():
+        try:
+            async for event in service.generate_chapter_stream(
+                chapter_id=chapter_id,
+                model_id=data.model_id,
+                max_tokens=data.max_tokens,
+                template_id=data.template_id,
+                auto_score=data.auto_score,
+                score_threshold=data.score_threshold,
+                auto_revise=data.auto_revise,
+                preview=data.preview,
+                temperature=data.temperature,
+                top_p=data.top_p,
+                resume=True,
+            ):
+                yield f"data: {event}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'续传失败: {type(e).__name__}: {str(e)}'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/chapters/{chapter_id}/cancel")
+async def cancel_generation(
+    chapter_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """标记生成中断（用户取消或前端检测到中断）"""
+    result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
+    chapter = result.scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    if chapter.generation_status == "generating":
+        chapter.generation_status = "interrupted"
+        chapter.status = chapter.status or "empty"
+        await db.commit()
+    return {"status": "cancelled", "generation_status": chapter.generation_status}
 
 
 @router.post("/chapters/{chapter_id}/regenerate")

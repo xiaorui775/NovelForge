@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
 
+    # Cost control (Phase 3.1)
+    # Hard limit per single generation (in tokens). 0 = no limit.
+    MAX_TOKENS_PER_GENERATION: int = 0
+    # Soft limit per single generation (in USD). 0 = no limit. Triggers confirmation.
+    MAX_COST_PER_GENERATION: float = 0.0
+    # If estimated cost > this, auto downgrade to a cheaper model if available.
+    AUTO_DOWNGRADE_THRESHOLD: float = 0.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

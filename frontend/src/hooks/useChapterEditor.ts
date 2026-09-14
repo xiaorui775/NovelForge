@@ -53,6 +53,10 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   const [topP, setTopP] = useState<number | null>(null);
   const [shortContentPrompt, setShortContentPrompt] = useState<{ wordCount: number; target: number } | null>(null);
 
+  // Phase 3.2 incremental generation state
+  const [canResume, setCanResume] = useState(false);
+  const [resumeHint, setResumeHint] = useState<string>('');
+
   const abortRef = useRef<AbortController | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const streamingContentRef = useRef('');
@@ -96,6 +100,18 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   useEffect(() => {
     if (chapterOutlineId) loadChapter();
   }, [chapterOutlineId]);
+
+  // Phase 3.2: detect if there is a draft that can be resumed
+  useEffect(() => {
+    if (chapter && chapter.generation_status === 'interrupted' && (chapter as any).content_draft) {
+      setCanResume(true);
+      const draftLen = ((chapter as any).content_draft || '').length;
+      setResumeHint(`检测到中断草稿（约 ${draftLen} 字），可续传`);
+    } else {
+      setCanResume(false);
+      setResumeHint('');
+    }
+  }, [chapter]);
 
   useEffect(() => {
     promptTemplatesApi.list().then(({ data }) => {
@@ -344,9 +360,89 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
         if (event.type === 'token' && event.content) {
           streamingContentRef.current += event.content;
           setStreamingContent(streamingContentRef.current);
+        } else if (event.type === 'model_switched') {
+          showToast('info', `模型切换: ${event.from_model} → ${event.to_model}（${event.reason || ''}）`);
         } else if (event.type === 'validation' && event.issues) {
           setValidationIssues(event.issues);
         } else if (event.type === 'conflicts') {
+          const count = event.conflicts?.length || 0;
+          if (count > 0) showToast('warning', `发现 ${count} 条冲突`);
+        } else if (event.type === 'done') {
+          setGenerating(false);
+          setStreamingContent('');
+          pushUndoSnapshot(content);
+          setLastGenStats({ token_used: event.token_used, cost: event.cost, duration_ms: event.duration_ms });
+          setSaveStatus('saved');
+          loadChapter();
+          streamingContentRef.current = '';
+          showToast('success', `续写完成，新增 ${event.word_count} 字`);
+        } else if (event.type === 'error') {
+          setGenerating(false);
+          setStreamingContent('');
+          showToast('error', event.message || '续写失败');
+        }
+      },
+    );
+  }, [chapter, selectedModel, content, pushUndoSnapshot, temperature, topP, showToast]);
+
+  // Phase 3.2: resume from interrupted draft
+  const handleResume = useCallback(() => {
+    if (!chapter || !selectedModel) return;
+    setGenerating(true);
+    setRefineSuggestions([]);
+    // Seed with existing draft if present
+    const draft = (chapter as any).content_draft || content || '';
+    streamingContentRef.current = draft;
+    setStreamingContent(draft);
+    setLastGenStats(null);
+    setValidationIssues([]);
+
+    abortRef.current = chaptersApi.resume(
+      chapter.id,
+      { model_id: selectedModel, temperature: temperature ?? undefined, top_p: topP ?? undefined },
+      (event: SSEEvent) => {
+        if (event.type === 'token' && event.content) {
+          streamingContentRef.current += event.content;
+          setStreamingContent(streamingContentRef.current);
+        } else if (event.type === 'model_switched') {
+          showToast('info', `模型切换: ${event.from_model} → ${event.to_model}`);
+        } else if (event.type === 'done') {
+          setGenerating(false);
+          setStreamingContent('');
+          pushUndoSnapshot(content);
+          setLastGenStats({ token_used: event.token_used, cost: event.cost, duration_ms: event.duration_ms });
+          setSaveStatus('saved');
+          loadChapter();
+          streamingContentRef.current = '';
+          showToast('success', `续传完成，共 ${event.word_count} 字`);
+          setCanResume(false);
+          setResumeHint('');
+        } else if (event.type === 'error') {
+          setGenerating(false);
+          setStreamingContent('');
+          showToast('error', event.message || '续传失败');
+        }
+      },
+    );
+  }, [chapter, selectedModel, content, pushUndoSnapshot, temperature, topP, showToast]);
+
+  // Phase 3.2: cancel current generation
+  const handleCancel = useCallback(async () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setGenerating(false);
+    setStreamingContent('');
+    if (chapter) {
+      try {
+        await chaptersApi.cancel(chapter.id);
+      } catch {}
+      // Reload to get latest generation_status / draft
+      await loadChapter();
+    }
+    showToast('info', '已取消生成');
+  }, [chapter, showToast]);
           const count = event.conflicts?.length || 0;
           if (count > 0) {
             showToast('warning', `发现 ${count} 条术语/故事圣经冲突，已按术语优先续写`);
