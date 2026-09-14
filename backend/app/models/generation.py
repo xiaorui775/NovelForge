@@ -41,6 +41,8 @@ class PromptTemplate(Base):
     type: Mapped[str] = mapped_column(String(50))
     content: Mapped[str] = mapped_column(Text)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Cost tier for Phase 4.1 (economy / standard / premium)
+    cost_tier: Mapped[str] = mapped_column(String(20), default="standard")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

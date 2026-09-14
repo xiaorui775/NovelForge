@@ -10,6 +10,7 @@ class PromptTemplateCreate(BaseModel):
     type: str = Field(..., max_length=50)
     content: str
     is_default: bool = False
+    cost_tier: str = Field(default="standard", max_length=20)
 
 
 class PromptTemplateUpdate(BaseModel):
@@ -17,6 +18,7 @@ class PromptTemplateUpdate(BaseModel):
     type: Optional[str] = Field(default=None, max_length=50)
     content: Optional[str] = None
     is_default: Optional[bool] = None
+    cost_tier: Optional[str] = Field(default=None, max_length=20)
 
 
 class PromptTemplateResponse(BaseModel):
@@ -25,6 +27,7 @@ class PromptTemplateResponse(BaseModel):
     type: str
     content: str
     is_default: bool
+    cost_tier: str
     created_at: datetime
     updated_at: datetime
 

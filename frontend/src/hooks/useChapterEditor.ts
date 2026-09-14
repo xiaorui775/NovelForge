@@ -31,7 +31,14 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
   const [selectedTemplate, setSelectedTemplate] = useState('');
   const [autoScore, setAutoScore] = useState(false);
   const [scoreThreshold, setScoreThreshold] = useState(6.0);
-  const [costEstimate, setCostEstimate] = useState<{ cost: number; tokens: number } | null>(null);
+  const [costEstimate, setCostEstimate] = useState<{
+    cost: number;
+    tokens: number;
+    selected_model_id?: string;
+    selected_model_name?: string;
+    auto_downgraded?: boolean;
+    routing_reason?: string;
+  } | null>(null);
   const [showCostConfirm, setShowCostConfirm] = useState(false);
   const [compareVersions, setCompareVersions] = useState<string[]>([]);
   const [diffData, setDiffData] = useState<{ v1: VersionCompare; v2: VersionCompare } | null>(null);
@@ -337,7 +344,14 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     if (!chapter || !selectedModel) return;
     try {
       const { data } = await chaptersApi.estimateCost(chapter.id, selectedModel, selectedTemplate || undefined);
-      setCostEstimate({ cost: data.estimated_cost, tokens: data.estimated_input_tokens + data.estimated_output_tokens });
+      setCostEstimate({
+        cost: data.estimated_cost,
+        tokens: data.estimated_input_tokens + data.estimated_output_tokens,
+        selected_model_id: data.selected_model_id,
+        selected_model_name: data.selected_model_name,
+        auto_downgraded: data.auto_downgraded,
+        routing_reason: data.routing_reason,
+      });
       setShowCostConfirm(true);
     } catch {
       doGenerate();
