@@ -12,6 +12,7 @@ from app.models.outline import ChapterOutline, Outline
 from app.models.project import Project
 from app.services.common import load_chapter_chain_with_model
 from app.utils.json_extract import extract_json
+from app.utils.cache import cached_quality
 
 
 class QualityService:
@@ -48,36 +49,46 @@ class QualityService:
         genre: str,
         model_config: ModelConfig,
     ) -> dict:
-        """对文本进行 AI 质量评分，可复用"""
-        # 截取内容避免过长（取前 5000 字）
-        content_excerpt = content[:5000] if len(content) > 5000 else content
+        """对文本进行 AI 质量评分，可复用（带简单内存缓存）"""
+        @cached_quality(ttl=3600)
+        async def _score(content: str, outline_summary: str, genre: str, model_config: ModelConfig) -> dict:
+            content_excerpt = content[:5000] if len(content) > 5000 else content
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是一位资深的文学编辑和小说评论家。请对以下小说章节进行专业评分。\n"
+                        "评分维度（0-10 分，可以有一位小数）：\n"
+                        "1. coherence（连贯性）：情节是否连贯，逻辑是否通顺\n"
+                        "2. writing_quality（文笔）：语言表达、修辞手法、文字功底\n"
+                        "3. plot_progression（情节推进）：情节是否有效推进，节奏是否合理\n"
+                        "4. overall（综合分）：加权总分\n\n"
+                        "请严格以 JSON 格式输出，不要包含任何其他内容：\n"
+                        '{"coherence": 8, "writing_quality": 7, "plot_progression": 9, "overall": 8.0, "notes": "简短评语"}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"小说类型：{genre}\n"
+                        f"章节大纲：{outline_summary}\n\n"
+                        f"章节内容：\n{content_excerpt}"
+                    ),
+                },
+            ]
+            adapter = await AdapterFactory.create(model_config)
+            result = await adapter.generate(messages, max_tokens=500)
+            raw = (result.get("content") or "").strip()
+            data = extract_json(raw) if raw else {}
+            return {
+                "coherence": float(data.get("coherence", 0)),
+                "writing_quality": float(data.get("writing_quality", 0)),
+                "plot_progression": float(data.get("plot_progression", 0)),
+                "overall": float(data.get("overall", 0)),
+                "notes": str(data.get("notes", ""))[:500],
+            }
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是一位资深的文学编辑和小说评论家。请对以下小说章节进行专业评分。\n"
-                    "评分维度（0-10 分，可以有一位小数）：\n"
-                    "1. coherence（连贯性）：情节是否连贯，逻辑是否通顺\n"
-                    "2. writing_quality（文笔）：语言表达、修辞手法、文字功底\n"
-                    "3. plot_progression（情节推进）：情节是否有效推进，节奏是否合理\n"
-                    "4. overall（综合分）：加权总分\n\n"
-                    "请严格以 JSON 格式输出，不要包含任何其他内容：\n"
-                    '{"coherence": 8, "writing_quality": 7, "plot_progression": 9, "overall": 8.0, "notes": "简短评语"}'
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"小说类型：{genre}\n"
-                    f"章节大纲：{outline_summary}\n\n"
-                    f"章节内容：\n{content_excerpt}"
-                ),
-            },
-        ]
-
-        adapter = await AdapterFactory.create(model_config)
-        result = await adapter.generate(messages, max_tokens=500)
+        return await _score(content, outline_summary, genre, model_config)
 
         # 解析 AI 返回的 JSON
         try:

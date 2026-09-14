@@ -575,6 +575,11 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
       setContent(streamingContent);
       setStreamingContent('');
     }
+    // Phase 3.2: also attempt to mark as interrupted on backend
+    if (chapter) {
+      // fire and forget
+      chaptersApi.cancel(chapter.id).catch(() => {});
+    }
   };
 
   const handleSave = async () => {
