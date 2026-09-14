@@ -29,6 +29,7 @@ from app.services.cost_budget_service import CostBudgetService
 from app.services.quality_service import QualityService
 from app.services.common import load_chapter_chain, load_chapter_chain_with_model
 from app.utils.json_extract import extract_json
+from app.services.model_router import ModelRouter, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -874,6 +875,7 @@ class GenerationService:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         adapter=None,
+        task_type: TaskType = TaskType.GENERATE,
     ) -> AsyncGenerator[str, None]:
         """流式生成章节内容，yield SSE 事件，支持自动评分重试"""
         max_retries = 2 if auto_score else 0
@@ -890,7 +892,39 @@ class GenerationService:
             chapter_outline = chain["chapter_outline"]
             outline = chain["outline"]
             project = chain["project"]
-            model_config = chain["model_config"]
+            requested_model = chain["model_config"]
+
+            # 路由决策：根据任务类型智能选择模型
+            all_models_result = await self.db.execute(
+                select(ModelConfig).where(ModelConfig.is_active == True)
+            )
+            all_models = list(all_models_result.scalars().all())
+            router = ModelRouter(all_models)
+            routing = router.recommend_for_task(
+                task=task_type,
+                context_tokens=None,
+                user_preferred_model_id=str(model_id),
+            )
+
+            # 确定实际使用的模型
+            effective_model = requested_model
+            if routing.recommended_model_id and routing.recommended_model_id != str(model_id):
+                rec = router.get_model(routing.recommended_model_id)
+                if rec:
+                    effective_model = rec
+                    yield json.dumps({
+                        "type": "model_switched",
+                        "from_model": requested_model.model_name,
+                        "to_model": effective_model.model_name,
+                        "reason": routing.reason,
+                    }, ensure_ascii=False)
+
+            # 如果传入了外部 adapter，使用它（测试/注入场景）
+            if adapter is None:
+                adapter = await AdapterFactory.create(effective_model)
+            else:
+                # 外部注入的 adapter 仍使用 requested_model 的价格计算
+                effective_model = requested_model
 
             # 并发锁定：检查是否正在生成中
             if chapter.status == "generating":
@@ -918,22 +952,18 @@ class GenerationService:
                 template = template_result.scalar_one_or_none()
 
             # 构建 prompt（根据模型上下文窗口计算预算）
-            context_budget = self._calc_context_budget(model_config)
+            context_budget = self._calc_context_budget(effective_model)
             bundle = await self._build_context_bundle(
                 chapter_outline=chapter_outline,
                 project=project,
                 outline=outline,
                 chapter_id=chapter_id,
                 context_budget=context_budget,
-                model_config=model_config,
+                model_config=effective_model,
             )
             if bundle["conflicts"]:
                 yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
-            messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget, model_config)
-
-            # 创建或复用适配器
-            if adapter is None:
-                adapter = await AdapterFactory.create(model_config)
+            messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, chapter_id, context_budget, effective_model)
 
             # 重试通知
             if retry_count > 0:
@@ -975,8 +1005,8 @@ class GenerationService:
                     token_used = adapter.count_tokens(full_content)
                     estimated_input_tokens = adapter.count_tokens(messages[0]["content"] + messages[1]["content"])
 
-                # 计算费用
-                input_rate, output_rate = self._get_effective_rates(model_config)
+                # 计算费用（使用实际生效的模型价格）
+                input_rate, output_rate = self._get_effective_rates(effective_model)
                 cost = input_rate * estimated_input_tokens / 1000 + output_rate * token_used / 1000
                 chapter.cost = round(cost, 6)
 
@@ -987,7 +1017,7 @@ class GenerationService:
                     # 正式模式：覆盖正文
                     chapter.content = full_content
                     chapter.word_count = word_count
-                    chapter.model_id = model_id
+                    chapter.model_id = effective_model.id
                     chapter.token_used = token_used
                     chapter.status = "completed"
 
@@ -1000,7 +1030,7 @@ class GenerationService:
                             content=full_content,
                             outline_summary=chapter_outline.summary or "",
                             genre=project.genre or "",
-                            model_config=model_config,
+                            model_config=effective_model,
                         )
                         quality_score_value = score_result["overall"]
 
@@ -1078,7 +1108,7 @@ class GenerationService:
                     project_id=project.id,
                     chapter_outline=chapter_outline,
                     chapter_content=full_content,
-                    model_config=model_config,
+                    model_config=effective_model,
                     adapter=adapter,
                     chapter_id=chapter.id,
                 )
@@ -1103,7 +1133,7 @@ class GenerationService:
                             }, ensure_ascii=False)
 
                             revised_content = await self._revise_for_quality(
-                                model_config, full_content, critical, project.genre or "",
+                                effective_model, full_content, critical, project.genre or "",
                                 adapter=adapter,
                             )
                             revised_issues = ValidationService.validate(revised_content, target)
@@ -1150,7 +1180,7 @@ class GenerationService:
 
                 # 生成结构化摘要（确保批量生成时下一章能看到前章摘要）
                 if not preview:
-                    await self._generate_content_summary(chapter, model_config, adapter=adapter)
+                    await self._generate_content_summary(chapter, effective_model, adapter=adapter)
                     # 本章正文落定后，后续章节的上下文摘要可能失效，交 worker 刷新
                     from app.services.summary_worker import mark_summaries_stale
                     try:
@@ -1196,7 +1226,7 @@ class GenerationService:
         chapter_outline = chain["chapter_outline"]
         outline = chain["outline"]
         project = chain["project"]
-        model_config = chain["model_config"]
+        requested_model = chain["model_config"]
 
         # 并发锁定
         if chapter.status == "generating":
@@ -1227,14 +1257,14 @@ class GenerationService:
         max_words = project.target_words_per_chapter_max or 5000
 
         # 构建统一上下文（续写时减预算）
-        context_budget = self._calc_context_budget(model_config, extra_chars=len(context_tail))
+        context_budget = self._calc_context_budget(effective_model, extra_chars=len(context_tail))
         bundle = await self._build_context_bundle(
             chapter_outline=chapter_outline,
             project=project,
             outline=outline,
             chapter_id=chapter_id,
             context_budget=context_budget,
-            model_config=model_config,
+            model_config=effective_model,
         )
         if bundle["conflicts"]:
             yield json.dumps({"type": "conflicts", "conflicts": bundle["conflicts"]}, ensure_ascii=False)
@@ -1290,9 +1320,9 @@ class GenerationService:
             {"role": "user", "content": "\n".join(user_parts)},
         ]
 
-        # 创建或复用适配器
+        # 创建或复用适配器（使用生效模型）
         if adapter is None:
-            adapter = await AdapterFactory.create(model_config)
+            adapter = await AdapterFactory.create(effective_model)
 
         # 流式生成
         start_time = time.time()
@@ -1319,7 +1349,7 @@ class GenerationService:
             # 保存到数据库
             chapter.content = full_content
             chapter.word_count = word_count
-            chapter.model_id = model_id
+            chapter.model_id = effective_model.id
 
             # 优先使用 API 返回的真实 token 数据
             usage = adapter.last_usage
@@ -1332,8 +1362,8 @@ class GenerationService:
             chapter.token_used = (chapter.token_used or 0) + new_token_used
             chapter.status = "completed"
 
-            # 计算费用
-            input_rate, output_rate = self._get_effective_rates(model_config)
+            # 计算费用（使用生效模型）
+            input_rate, output_rate = self._get_effective_rates(effective_model)
             cost = input_rate * estimated_input_tokens / 1000 + output_rate * new_token_used / 1000
             additional_cost = Decimal(str(round(cost, 6)))
             chapter.cost = (chapter.cost or Decimal("0")) + additional_cost
@@ -1349,7 +1379,7 @@ class GenerationService:
                 version_number=len(versions) + 1,
                 content=full_content,
                 word_count=word_count,
-                model_id=model_id,
+                model_id=effective_model.id,
                 token_used=chapter.token_used,
                 change_type="ai_generate",
                 diff_snapshot=diff_snapshot,
@@ -1363,7 +1393,7 @@ class GenerationService:
             # 写入生成日志
             log = GenerationLog(
                 chapter_id=chapter_id,
-                model_id=model_id,
+                model_id=effective_model.id,
                 status="completed",
                 token_input=estimated_input_tokens,
                 token_output=new_token_used,
@@ -1378,13 +1408,13 @@ class GenerationService:
                 project_id=project.id,
                 chapter_outline=chapter_outline,
                 chapter_content=full_content,
-                model_config=model_config,
+                model_config=effective_model,
                 adapter=adapter,
                 chapter_id=chapter.id,
             )
 
             # 生成结构化摘要
-            await self._generate_content_summary(chapter, model_config, adapter=adapter)
+            await self._generate_content_summary(chapter, effective_model, adapter=adapter)
             # 本章正文落定后，后续章节上下文摘要可能失效，交 worker 刷新
             from app.services.summary_worker import mark_summaries_stale
             try:
@@ -1412,7 +1442,7 @@ class GenerationService:
                         }, ensure_ascii=False)
 
                         revised_content = await self._revise_for_quality(
-                            model_config, full_content, critical, project.genre or "",
+                            effective_model, full_content, critical, project.genre or "",
                             adapter=adapter,
                         )
                         revised_issues = ValidationService.validate(revised_content, target)
@@ -1715,7 +1745,7 @@ class GenerationService:
         chapter_outline = chain["chapter_outline"]
         outline = chain["outline"]
         project = chain["project"]
-        model_config = chain["model_config"]
+        requested_model = chain["model_config"]
 
         # 使用当前上下文构建逻辑估算各模块 token
         terminologies_result = await self.db.execute(select(Terminology).where(Terminology.project_id == project.id))
@@ -1803,7 +1833,7 @@ class GenerationService:
         chapter_outline = chain["chapter_outline"]
         outline = chain["outline"]
         project = chain["project"]
-        model_config = chain["model_config"]
+        requested_model = chain["model_config"]
 
         paragraphs = [p.strip() for p in draft_text.split("\n") if p.strip()]
         if len(paragraphs) == 0:
@@ -1894,7 +1924,7 @@ class GenerationService:
         chapter_outline = chain["chapter_outline"]
         outline = chain["outline"]
         project = chain["project"]
-        model_config = chain["model_config"]
+        requested_model = chain["model_config"]
 
         # 并发锁定
         if chapter.status == "generating":
@@ -2153,14 +2183,51 @@ class GenerationService:
         chapter_id: uuid.UUID,
         model_id: uuid.UUID,
         template_id: Optional[uuid.UUID] = None,
+        task_type: TaskType = TaskType.GENERATE,
     ) -> dict:
-        """预估生成费用"""
+        """预估生成费用（支持模型路由）
+
+        Args:
+            chapter_id: 章节 ID
+            model_id: 用户指定的模型 ID（可能被路由覆盖）
+            template_id: 可选的模板 ID
+            task_type: 任务类型，用于路由决策
+
+        Returns:
+            dict with estimated tokens/cost + routing info
+        """
+        # 加载实体链
         chain = await load_chapter_chain_with_model(self.db, chapter_id, model_id)
-        chapter = chain["chapter"]
         chapter_outline = chain["chapter_outline"]
         outline = chain["outline"]
         project = chain["project"]
-        model_config = chain["model_config"]
+        requested_model = chain["model_config"]
+
+        # 收集所有可用模型用于路由
+        all_models_result = await self.db.execute(
+            select(ModelConfig).where(ModelConfig.is_active == True)
+        )
+        all_models = list(all_models_result.scalars().all())
+
+        # 路由决策
+        router = ModelRouter(all_models)
+        routing = router.recommend_for_task(
+            task=task_type,
+            context_tokens=None,  # 预估阶段暂不传长度，路由会基于任务类型
+            user_preferred_model_id=str(model_id),
+        )
+
+        # 确定最终使用的模型
+        effective_model = requested_model
+        auto_downgraded = False
+        routing_reason = routing.reason
+
+        if routing.recommended_model_id and routing.recommended_model_id != str(model_id):
+            # 检查是否是降级/升级推荐
+            rec = router.get_model(routing.recommended_model_id)
+            if rec:
+                effective_model = rec
+                auto_downgraded = routing.auto_downgraded
 
         # 获取模板
         template = None
@@ -2170,20 +2237,23 @@ class GenerationService:
             )
             template = template_result.scalar_one_or_none()
 
-        # 构建 prompt 计算 input tokens
-        context_budget = self._calc_context_budget(model_config)
-        messages = await self._build_chapter_prompt(chapter_outline, project, outline, template, context_budget=context_budget, model_config=model_config)
+        # 构建 prompt 计算 input tokens（使用最终模型）
+        context_budget = self._calc_context_budget(effective_model)
+        messages = await self._build_chapter_prompt(
+            chapter_outline, project, outline, template,
+            context_budget=context_budget, model_config=effective_model
+        )
         prompt_text = messages[0]["content"] + messages[1]["content"]
 
-        adapter = await AdapterFactory.create(model_config)
+        adapter = await AdapterFactory.create(effective_model)
         estimated_input_tokens = adapter.count_tokens(prompt_text)
 
         # 估算 output tokens（基于目标字数）
         max_words = project.target_words_per_chapter_max or 5000
         estimated_output_tokens = int(max_words * 1.5)  # 中文约 1.5 tokens/字
 
-        # 计算费用
-        input_rate, output_rate = self._get_effective_rates(model_config)
+        # 计算费用（使用最终模型的价格）
+        input_rate, output_rate = self._get_effective_rates(effective_model)
         estimated_cost = (
             input_rate * estimated_input_tokens / 1000
             + output_rate * estimated_output_tokens / 1000
@@ -2193,6 +2263,10 @@ class GenerationService:
             "estimated_input_tokens": estimated_input_tokens,
             "estimated_output_tokens": estimated_output_tokens,
             "estimated_cost": round(estimated_cost, 6),
+            "selected_model_id": effective_model.id,
+            "selected_model_name": effective_model.model_name,
+            "auto_downgraded": auto_downgraded,
+            "routing_reason": routing_reason,
         }
 
     async def rewrite_selection_stream(
@@ -2218,7 +2292,7 @@ class GenerationService:
         chapter_outline = chain["chapter_outline"]
         outline = chain["outline"]
         project = chain["project"]
-        model_config = chain["model_config"]
+        requested_model = chain["model_config"]
 
         # 注入术语表和角色，避免改写违反设定一致性
         terms_text = ""
@@ -2291,7 +2365,7 @@ class GenerationService:
         chapter_outline = chain["chapter_outline"]
         outline = chain["outline"]
         project = chain["project"]
-        model_config = chain["model_config"]
+        requested_model = chain["model_config"]
 
         context_budget = self._calc_context_budget(model_config)
         bundle = await self._build_context_bundle(

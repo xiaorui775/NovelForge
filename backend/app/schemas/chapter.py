@@ -88,6 +88,11 @@ class CostEstimateResponse(BaseModel):
     estimated_input_tokens: int
     estimated_output_tokens: int
     estimated_cost: float
+    # 路由增强信息（可选）
+    selected_model_id: Optional[uuid.UUID] = None
+    selected_model_name: Optional[str] = None
+    auto_downgraded: bool = False
+    routing_reason: Optional[str] = None
 
 
 class ConsistencyIssue(BaseModel):

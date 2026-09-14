@@ -40,6 +40,7 @@ from app.services.generation_service import GenerationService
 from app.services.post_write_service import PostWriteAnalysisService
 from app.services.pacing_service import PacingService
 from app.services.quality_service import QualityService
+from app.services.model_router import TaskType
 
 router = APIRouter(tags=["chapters"])
 
@@ -589,7 +590,7 @@ async def estimate_cost(
     service: GenerationService = Depends(get_generation_service),
 ):
     try:
-        result = await service.estimate_cost(chapter_id, data.model_id, data.template_id)
+        result = await service.estimate_cost(chapter_id, data.model_id, data.template_id, TaskType.GENERATE)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
