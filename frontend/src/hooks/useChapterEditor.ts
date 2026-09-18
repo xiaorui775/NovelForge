@@ -457,29 +457,6 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     }
     showToast('info', '已取消生成');
   }, [chapter, showToast]);
-          const count = event.conflicts?.length || 0;
-          if (count > 0) {
-            showToast('warning', `发现 ${count} 条术语/故事圣经冲突，已按术语优先续写`);
-          }
-        } else if (event.type === 'done') {
-          setGenerating(false);
-          streamingContentRef.current = '';
-          setStreamingContent('');
-          pushUndoSnapshot(content);
-          setLastGenStats({ token_used: event.token_used, cost: event.cost, duration_ms: event.duration_ms });
-          setSaveStatus('saved');
-          loadChapter();
-          showToast('success', `续写完成，共 ${event.word_count} 字`);
-          sendNotification('NovelForge', `续写完成，共 ${event.word_count} 字`);
-        } else if (event.type === 'error') {
-          setGenerating(false);
-          streamingContentRef.current = '';
-          setStreamingContent('');
-          showToast('error', event.message || '续写失败');
-        }
-      },
-    );
-  }, [chapter, selectedModel, content, pushUndoSnapshot]);
 
   const handleRefine = useCallback(() => {
     if (!chapter || !selectedModel || !content || content.trim().length < 50) {
@@ -748,12 +725,15 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     previewMode, setPreviewMode, previewVersionId, previewContent,
     temperature, setTemperature, topP, setTopP,
     shortContentPrompt, setShortContentPrompt,
+    // Phase 3.2 resume
+    canResume, resumeHint,
     handleGenerate, handleContinue, handleRefine, handleBrainstorm, handleStop, handleSave,
     handleRestoreVersion, handleScore, toggleCompareVersion,
     handleCompare, handleConsistencyCheck, doGenerate, models,
     handleApplyRewrite, handleUndo, handleRedo, pushUndoSnapshot,
     applyRefineSuggestion, dismissRefineSuggestion,
     handleAdoptPreview, handleDiscardPreview,
+    handleResume, handleCancel,
   }), [
     chapterOutline, chapter, versions, content, loading, selectedModel, generating,
     streamingContent, showVersions, saving, lastGenStats, saveStatus, saveRetrying,
@@ -768,5 +748,6 @@ export function useChapterEditor(chapterOutlineId: string | undefined) {
     handleBrainstorm, handleSave, handleRestoreVersion, handleScore, handleCompare,
     handleConsistencyCheck, doGenerate, applyRefineSuggestion, dismissRefineSuggestion,
     handleAdoptPreview, handleDiscardPreview,
+    handleResume, handleCancel,
   ]);
 }

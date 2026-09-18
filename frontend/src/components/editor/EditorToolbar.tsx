@@ -49,6 +49,7 @@ export default function EditorToolbar({
   brainstorming = false, onBrainstorm,
   temperature, onTemperatureChange, topP, onTopPChange,
   onGenerate, onContinue, onRefine, onStop,
+  onResume, resumeHint,
 }: EditorToolbarProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const activeCount = [

@@ -104,6 +104,15 @@ export interface SSEEvent {
   directions?: ChapterBrainstormDirection[];
   transition_text?: string;
   preview_version_id?: string;
+  // Routing / cost control events (Phase 1 + 3.1)
+  from_model?: string;
+  to_model?: string;
+  routing_reason?: string;
+  // Cost estimate enhanced
+  selected_model_id?: string;
+  selected_model_name?: string;
+  auto_downgraded?: boolean;
+  cost_routing_reason?: string;
 }
 
 export interface QualityScore {
